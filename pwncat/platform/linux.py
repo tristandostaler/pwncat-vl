@@ -582,13 +582,6 @@ class Linux(Platform):
             str(_pkg_files("pwncat").joinpath("data/gtfobins.json")), self.which,
         )
 
-        # Drain any shell startup output (e.g. "bash: no job control",
-        # MOTD, or other banners) before sending commands. We use a
-        # deterministic marker handshake instead of a fixed sleep so that
-        # late-arriving startup output on high-latency links cannot bleed
-        # into the first framed command and desync the parser.
-        self._sync_shell()
-
         # Ensure history is disabled
         self.disable_history()
 
@@ -1848,7 +1841,15 @@ class Linux(Platform):
 
         # Update self.shell just in case the user changed shells
         try:
-            pid = self.getenv("$").strip()
+            # Terminal integration can emit ANSI formatting or bracketed-paste
+            # controls alongside the value. Keep strict validation of the
+            # remaining text rather than guessing a PID from arbitrary output.
+            pid = util.strip_ansi_escape(self.getenv("$")).strip()
+            if not (pid.isascii() and pid.isdecimal()):
+                raise PlatformError(
+                    "Cannot identify the shell: expected a numeric process ID, "
+                    "but received unexpected terminal output."
+                )
             proc_exe_path = f"/proc/{pid}/exe"
             self.shell = self.readlink(proc_exe_path)
         except (FileNotFoundError, PermissionError, OSError, AttributeError):
@@ -1882,7 +1883,10 @@ class Linux(Platform):
             command = " ; ".join([" stty -echo nl lnext ^V", "export PS1="]) + "\n"
             self.logger.info(command.rstrip("\n"))
             self.channel.send(command.encode("utf-8"))
-            self.channel.drain()
+            # Wait for terminal setup and delayed startup output before the
+            # first PID/metadata query. A nonblocking drain can return before
+            # the shell has processed the setup command.
+            self._sync_shell()
             self._interactive = False
 
             # update current user and shell variable
@@ -1962,6 +1966,14 @@ class Linux(Platform):
         result = result.rstrip("\n")[::-1]
         fields = [field[::-1] for field in result.split(" ")]
 
+        if len(fields) < 16:
+            count = len(fields) if result else 0
+            raise PlatformError(
+                "Invalid stat response: expected at least 16 fields, "
+                f"received {count}. File metadata lookup stopped; check the "
+                "SSH host's stat format and shell output."
+            )
+
         # Field order:
         #  0  optimal I/O transfer size
         #  1  time of file birth
@@ -2012,51 +2024,43 @@ class Linux(Platform):
         """Perform the equivalent of the stat syscall on
         the remote host"""
 
-        while True:
-            try:
-                result = self.run(
-                    [
-                        "stat",
-                        "-L",
-                        "-c",
-                        "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o",
-                        path,
-                    ],
-                    capture_output=True,
-                    encoding="utf-8",
-                    check=True,
-                )
-            except CalledProcessError as exc:
-                raise FileNotFoundError(path) from exc
+        try:
+            result = self.run(
+                [
+                    "stat",
+                    "-L",
+                    "-c",
+                    "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o",
+                    path,
+                ],
+                capture_output=True,
+                encoding="utf-8",
+                check=True,
+            )
+        except CalledProcessError as exc:
+            raise FileNotFoundError(path) from exc
 
-            try:
-                return self._parse_stat(result.stdout)
-            except IndexError:
-                pass
+        return self._parse_stat(result.stdout)
 
     def lstat(self, path: str) -> os.stat_result:
         """Perform the equivalent of the lstat syscall"""
 
-        while True:
-            try:
-                result = self.run(
-                    [
-                        "stat",
-                        "-c",
-                        "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o",
-                        path,
-                    ],
-                    capture_output=True,
-                    encoding="utf-8",
-                    check=True,
-                )
-            except CalledProcessError as exc:
-                raise FileNotFoundError(path) from exc
+        try:
+            result = self.run(
+                [
+                    "stat",
+                    "-c",
+                    "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o",
+                    path,
+                ],
+                capture_output=True,
+                encoding="utf-8",
+                check=True,
+            )
+        except CalledProcessError as exc:
+            raise FileNotFoundError(path) from exc
 
-            try:
-                return self._parse_stat(result.stdout)
-            except IndexError:
-                pass
+        return self._parse_stat(result.stdout)
 
     def abspath(self, path: str) -> str:
         """Attempt to resolve a path to an absolute path"""

@@ -5,6 +5,14 @@ class WorkspaceError(Exception):
     """An actionable workspace failure, safe to show after terminal restoration."""
 
 
+class WorkspaceMissing(WorkspaceError):
+    """The remote workspace directory no longer exists."""
+
+
+class WorkspaceStopped(WorkspaceError):
+    """The remote tmux server could not be reached; recovery must verify it stopped."""
+
+
 class ConnectionLost(WorkspaceError):
     """The SSH connection was lost. Only attachment may be retried."""
 

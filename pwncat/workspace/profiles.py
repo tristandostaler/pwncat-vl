@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import IdentityMismatch, WorkspaceError
-from .credentials import CredentialStore
+from .credentials import CredentialStore, Secrets
 from .model import ForwardRule, WorkspaceRef, workspace_name
 from .ssh import SSHProfile
 
@@ -50,6 +50,17 @@ def normalize_hostname(value):
         ) from exc
 
 
+def validate_username(value):
+    """Keep literal SSH account names, including DOMAIN\\user and user@domain."""
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or any(ord(c) < 32 or ord(c) == 127 for c in value)
+    ):
+        raise WorkspaceError("Use a nonempty SSH username without control characters.")
+    return value
+
+
 @dataclass(frozen=True)
 class SavedWorkspace:
     alias: str
@@ -63,7 +74,7 @@ class SavedWorkspace:
 
     @property
     def console_history_binding(self):
-        # Keep existing history after an explicit hostname edit. Ordinary
+        # Keep existing history after an explicit connection edit. Ordinary
         # destination changes and replacement workspaces still get new bindings.
         if self.history_binding is not None:
             return self.history_binding
@@ -300,37 +311,82 @@ class ProfileStore:
             self._write(saved)
 
     def edit_hostname(self, alias, hostname):
+        return self.edit_connection(alias, hostname=hostname)
+
+    def edit_connection(
+        self, alias, *, hostname=None, username=None, password_reader=None
+    ):
         """Update a local destination; never connect or adopt a new remote identity."""
-        hostname = normalize_hostname(hostname)
+        if hostname is not None:
+            hostname = normalize_hostname(hostname)
+        if username is not None:
+            username = validate_username(username)
+        if hostname is None and username is None and password_reader is None:
+            raise WorkspaceError(
+                "Choose at least one of --host, --username, or --password."
+            )
         with self._lock():
             saved = self.get(alias)
             if saved is None:
                 raise WorkspaceError("No local workspace profile with that name.")
-            if hostname == saved.connection.host:
+            connection = replace(
+                saved.connection,
+                host=hostname if hostname is not None else saved.connection.host,
+                user=username if username is not None else saved.connection.user,
+            )
+            destination_changed = connection != saved.connection
+            if not destination_changed and password_reader is None:
                 return saved, False, False
             updated = replace(
                 saved,
-                connection=replace(saved.connection, host=hostname),
-                credential_ref=None,
+                connection=connection,
+                password_prompt=True
+                if password_reader is not None
+                else saved.password_prompt,
                 history_binding=saved.console_history_binding,
             )
             SavedWorkspace.parse(updated.document(), alias)
-            # Delete before publishing: a vault failure must leave the old
-            # destination intact, with its secret still addressable for retry.
+            old_vault = new_vault = None
+            previous = Secrets()
             if saved.credential_ref:
-                CredentialStore(self.root, alias, saved.connection).delete(
-                    saved.credential_ref
-                )
+                old_vault = CredentialStore(self.root, alias, saved.connection)
+                previous = old_vault.read(saved.credential_ref)
+            if old_vault or password_reader is not None:
+                new_vault = CredentialStore(self.root, alias, connection)
+                _ = new_vault.backend  # Check availability before asking for a secret.
+                updated = replace(updated, credential_ref=new_vault.reference)
+            secrets = previous
+            if password_reader is not None:
+                secrets = replace(previous, password=password_reader())
+            # The OS vault and profile file cannot share a transaction. Keep the
+            # previous secrets in memory until publication so failures can roll back.
+            old_touched = False
             try:
+                if new_vault:
+                    old_touched = old_vault is not None and not destination_changed
+                    new_vault.write(secrets)
+                if old_vault and destination_changed:
+                    old_touched = True
+                    old_vault.delete(saved.credential_ref)
                 self._write(updated)
-            except OSError as exc:
-                if saved.credential_ref:
+            except BaseException as exc:
+                try:
+                    if old_touched:
+                        old_vault.write(previous)
+                    if new_vault and (destination_changed or old_vault is None):
+                        new_vault.delete(new_vault.reference)
+                except Exception:  # noqa: BLE001 - vault errors must never expose secrets
                     raise WorkspaceError(
-                        "Hostname was not updated, but saved credentials were removed. "
-                        "Retry the edit, or connect with --password/--passphrase to enter them again."
-                    ) from exc
-                raise
-            return updated, True, saved.credential_ref is not None
+                        "The edit failed and the credential store could not fully undo it. "
+                        "Unlock the store and retry; saved credentials may need to be entered again."
+                    ) from None
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                raise WorkspaceError(
+                    "Workspace settings were not updated. Previous saved credentials were retained. "
+                    "Check the profile directory and system credential store, then retry."
+                ) from None
+            return updated, True, bool(old_vault and destination_changed)
 
     def _write(self, saved):
         """Atomically publish a validated profile while holding _lock()."""

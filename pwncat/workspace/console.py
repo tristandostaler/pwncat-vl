@@ -1,10 +1,26 @@
-"""Interactive workspace commands with explicit pane and SSH filesystem contexts."""
+"""Interactive workspace commands with explicit pane and SSH filesystem
+contexts.
 
+The *outer* loop lives in ``cli.interact``: it alternates ``display()`` (native
+tmux) and ``WorkspaceConsole.run()``, handles Ctrl+G p / Ctrl+G d / Ctrl+],
+reconnection, saved forwards and the ``.history-NAME.json`` file.
+
+``WorkspaceConsole.run()`` now delegates its *inner* REPL to the normal pwncat
+``Manager`` / ``CommandParser`` over one extra SSH shell channel on the
+workspace's authenticated ``SSHClient``.  Every pwncat command and module is
+therefore available (``run``, ``search``, ``use``, ``set``, ``sessions``,
+``enumerate``, ``escalate``, ``persist``, ``implant``, ...) with the normal
+``(local) pwncat$`` prompt, completion, syntax highlighting, aliases, key
+bindings and database history.  Workspace actions are registered as normal
+``CommandDefinition`` objects by ``console_commands.WORKSPACE_COMMANDS``.
+
+``run()`` still returns ``"detach"`` or ``"resume"`` so ``cli.interact`` keeps
+its existing routing and reconnect behaviour.
+"""
 from __future__ import annotations
 
 import os
 import shlex
-import sys
 from dataclasses import dataclass, field
 
 from prompt_toolkit.history import InMemoryHistory
@@ -13,15 +29,12 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from pwncat.channel import ChannelError
+from pwncat.manager import InteractiveExit, Manager
+
 from . import ConnectionLost, OutcomeUnknown, WorkspaceError
 from .console_history import ConsoleHistory
-from .console_ui import (
-    colors_enabled,
-    create_prompt,
-    output_console,
-    prompt_color_depth,
-    prompt_text,
-)
+from .console_ui import colors_enabled, output_console
 from .files import FileService
 from .forwarding import LOOPBACK, destination_address, port_number
 from .model import pane_id, safe_text
@@ -33,9 +46,18 @@ COMMANDS = {
         "color [auto|on|off]",
         "Inspect or change console colors for this client.",
     ),
-    "status": ("status", "Show connection, history policy, and selected pane context."),
-    "panes": ("panes", "List panes across all windows; * marks the selected pane."),
-    "select": ("select %ID", "Select a pane and its window for resume and split."),
+    "status": (
+        "status",
+        "Show connection, history policy, and selected pane context.",
+    ),
+    "panes": (
+        "panes",
+        "List panes across all windows; * marks the selected pane.",
+    ),
+    "select": (
+        "select %ID",
+        "Select a pane and its window for resume and split.",
+    ),
     "split": (
         "split [%ID] [horizontal|vertical]",
         "Split the selected or specified pane.",
@@ -59,18 +81,15 @@ COMMANDS = {
     "detach": ("detach", "Leave the workspace; remote processes keep running."),
 }
 
-
 def message(text, style="", *, console=None):
     output = console if console is not None else Console(emoji=False, highlight=False)
     output.print(Text(text, style=style))
-
 
 def detail(label, value, *, console=None):
     text = Text(label + ": ", style="bold cyan")
     text.append(safe_text(value), style="default")
     output = console if console is not None else Console(emoji=False, highlight=False)
     output.print(text)
-
 
 @dataclass
 class ConsoleState:
@@ -81,14 +100,17 @@ class ConsoleState:
     forward_settings: SavedForwards | None = field(default=None, repr=False)
     history_store: ConsoleHistory | None = field(default=None, repr=False)
     history_loaded: bool = False
-
+    # Set by ``resume`` / ``detach`` / connection loss and read by ``run``.
+    exit_reason: str | None = None
 
 def print_panes(backend, selected=None, *, console=None):
     panes = backend.panes()
     console = console if console is not None else Console(emoji=False, highlight=False)
     if console.is_terminal:
         table = Table(
-            header_style="bold cyan", border_style="bright_black", expand=True
+            header_style="bold cyan",
+            border_style="bright_black",
+            expand=True,
         )
         for name in ("", "Pane", "Window", "PID", "Size", "State", "Directory"):
             table.add_column(name)
@@ -109,11 +131,11 @@ def print_panes(backend, selected=None, *, console=None):
         return
     for pane in panes:
         print(
-            f"{'*' if pane.id == selected else ' '} {pane.id:>5}  window={pane.window_id}  "
-            f"pid={pane.pid:<7} {pane.width}x{pane.height}  "
-            f"{'exited' if pane.dead else 'running'}  {safe_text(pane.directory)}"
+            f"{'*' if pane.id == selected else ' '} {pane.id:>5} "
+            f"window={pane.window_id} "
+            f"pid={pane.pid:<7} {pane.width}x{pane.height} "
+            f"{'exited' if pane.dead else 'running'} {safe_text(pane.directory)}"
         )
-
 
 def transfer(backend, action, source, destination, overwrite=False, *, console=None):
     service = FileService(backend.connection.filesystem())
@@ -124,11 +146,31 @@ def transfer(backend, action, source, destination, overwrite=False, *, console=N
         console=console,
     )
 
-
 class WorkspaceConsole:
     def __init__(self, backend, state=None):
         self.backend = backend
         self.state = state if state is not None else ConsoleState()
+        self._manager = None
+
+    def close(self):
+        """Release the console on detach or connection loss, never on resume."""
+        manager, self._manager = self._manager, None
+        if manager is None:
+            return
+        manager.interactive_running = False
+        try:
+            for listener in manager.listeners:
+                listener.stop()
+            for session in list(manager.sessions.values()):
+                try:
+                    # Do not issue shell commands during transport teardown.
+                    session.platform.channel.close()
+                except (ChannelError, OSError):
+                    pass
+                finally:
+                    session.died()
+        finally:
+            manager.db.close()
 
     def message(self, text, style=""):
         message(text, style, console=output_console(self.state))
@@ -145,7 +187,8 @@ class WorkspaceConsole:
             self.message(description)
             if args[0] == "forward":
                 self.message(
-                    "SERVER_IP defaults to 127.0.0.1. Use a loopback IP or the IP of the current SSH connection.",
+                    "SERVER_IP defaults to 127.0.0.1. Use a loopback IP or the IP of the current SSH "
+                    "connection.",
                     "dim",
                 )
                 self.message(
@@ -160,7 +203,8 @@ class WorkspaceConsole:
             table.add_row(Text(name), Text(description))
         output_console(self.state).print(table)
         self.message(
-            "Use 'help COMMAND' for usage. Tab completes commands and options.", "dim"
+            "Use 'help COMMAND' for usage. Tab completes commands and options.",
+            "dim",
         )
 
     def selected(self):
@@ -170,8 +214,10 @@ class WorkspaceConsole:
         return self.backend.pane(self.state.selected)
 
     def local_path(self, value):
+        # pwncat's ``lcd`` changes the process working directory; resolve
+        # relative transfer paths against it so both consoles agree.
         return os.path.abspath(
-            os.path.join(self.state.local_directory, os.path.expanduser(value))
+            os.path.join(os.getcwd(), os.path.expanduser(value))
         )
 
     def usage(self, command):
@@ -188,9 +234,7 @@ class WorkspaceConsole:
                     + safe_text(exc),
                     "yellow",
                 )
-                self.state.history_store = (
-                    None  # Continue in memory for this invocation.
-                )
+                self.state.history_store = None  # Continue in memory for this invocation.
         return result
 
     def _execute(self, line):
@@ -212,7 +256,8 @@ class WorkspaceConsole:
             if args:
                 self.state.color_mode = args[0]
             self.message(
-                f"Colors: {self.state.color_mode} ({'enabled' if colors_enabled(self.state) else 'disabled'}).",
+                f"Colors: {self.state.color_mode} "
+                f"({'enabled' if colors_enabled(self.state) else 'disabled'}).",
                 "bold magenta",
             )
             self.message(
@@ -307,13 +352,13 @@ class WorkspaceConsole:
                 self.message("No local forwards in this connection.", "dim")
             for entry in entries:
                 self.message(
-                    f"127.0.0.1:{entry.local_port} -> SSH host {entry.remote_endpoint}  "
-                    f"{'listening' if entry.running else 'stopped'}  connections={entry.connections}"
-                    + ("  saved" if entry.local_port in saved_ports else ""),
+                    f"127.0.0.1:{entry.local_port} -> SSH host {entry.remote_endpoint} "
+                    f"{'listening' if entry.running else 'stopped'} connections={entry.connections}"
+                    + (" saved" if entry.local_port in saved_ports else ""),
                     "cyan" if entry.running else "yellow",
                 )
                 if entry.error:
-                    self.message("  Last error: " + safe_text(entry.error), "yellow")
+                    self.message(" Last error: " + safe_text(entry.error), "yellow")
         elif len(args) in (3, 4) and args[0] == "add":
             local, remote = port_number(args[1]), port_number(args[-1])
             destination = str(
@@ -365,13 +410,14 @@ class WorkspaceConsole:
         manifest = self.backend.store.load(self.backend.ref.name)
         self.detail("Workspace", self.backend.ref.name)
         self.detail(
-            "SSH / file account", f"{profile.user}@{profile.host}:{profile.port}"
+            "SSH / file account",
+            f"{profile.user}@{profile.host}:{profile.port}",
         )
         self.detail(
             "History",
             manifest["history"] + "; scrollback remains in the live tmux server",
         )
-        self.detail("Local directory", self.state.local_directory)
+        self.detail("Local directory", os.getcwd())
         try:
             pane = self.selected()
         except (ConnectionLost, OutcomeUnknown):
@@ -380,7 +426,7 @@ class WorkspaceConsole:
             self.message("Selected pane unavailable: " + safe_text(exc), "yellow")
             return
         self.detail(
-            "Selected pane", f"{pane.id}  window={pane.window_id}  pid={pane.pid}"
+            "Selected pane", f"{pane.id} window={pane.window_id} pid={pane.pid}"
         )
         self.detail("Observed directory", pane.directory)
         self.message(
@@ -389,6 +435,7 @@ class WorkspaceConsole:
         )
 
     def run(self):
+        self.state.exit_reason = None
         # On entry, native tmux owns the current selection. During the console,
         # explicit stable IDs remain authoritative even if a pane disappears.
         self.state.selected = self.backend.current_pane()
@@ -405,39 +452,74 @@ class WorkspaceConsole:
                     )
                     self.state.history_store = None
         self.message(
-            "\nWorkspace console. 'help' lists commands; Ctrl+Q or 'resume' returns to the remote pane.",
+            "\nWorkspace console. Normal pwncat commands and workspace commands are available. "
+            "'detach' leaves the workspace; Ctrl+Q or 'resume' returns to the pane.",
             "bold magenta",
         )
-        self.status()
-        prompt = None
-        if sys.stdin.isatty() and sys.stdout.isatty():
-            prompt = create_prompt(self.state, COMMANDS, self.backend.ref.name)
-        while True:
-            try:
-                label = "".join(
-                    text for _, text in prompt_text(self.state, self.backend.ref.name)
-                )
-                if prompt:
-                    prompt.color_depth = prompt_color_depth(self.state)
-                line = prompt.prompt() if prompt else input(label)
-            except EOFError:
-                return "detach"
-            except KeyboardInterrupt:
-                print("\nCancelled. No operation will be replayed.")
-                continue
-            try:
-                action = self.execute(line)
-                if action:
-                    return action
-            except KeyboardInterrupt:
-                print("\nCancelled. No operation will be replayed.")
-            except ConnectionLost:
-                raise
-            except (WorkspaceError, OSError, ValueError, EOFError) as exc:
-                self.message("Error: " + safe_text(exc), "bold red")
-                if isinstance(exc, OutcomeUnknown):
-                    self.backend.close()
+        return self._run_pwncat_console()
+
+    def _run_pwncat_console(self):
+        """Re-enter the same console and active session after a tmux visit."""
+        from .console_commands import WORKSPACE_COMMANDS
+        from .platform import WorkspaceChannel
+
+        if self._manager is None:
+            manager = self._manager = Manager()
+            manager.workspace_console = self
+            manager.workspace_state = self.state
+            manager.workspace_backend = self.backend
+
+            # Insert at the front so workspace ``upload``/``download`` keep
+            # their SFTP staging and SHA-256 guarantees over pwncat's own.
+            manager.parser.commands[:0] = [
+                cls(manager) for cls in WORKSPACE_COMMANDS
+            ]
+
+            original_dispatch = manager.parser.dispatch_line
+
+            def dispatch(line, *a, **k):
+                result = original_dispatch(line, *a, **k)
+                if self.state.history_store:
+                    try:
+                        self.state.history_store.record(line)
+                    except (WorkspaceError, OSError) as exc:
+                        self.message(
+                            "Command completed, but console history could not be saved: "
+                            + safe_text(exc),
+                            "yellow",
+                        )
+                        self.state.history_store = None
                 if not self.backend.connection.active():
-                    raise ConnectionLost(
-                        "SSH disconnected; the command was not replayed."
-                    ) from exc
+                    self.state.exit_reason = "connection-lost"
+                    raise InteractiveExit
+                return result
+
+            manager.parser.dispatch_line = dispatch
+
+            channel = None
+            try:
+                channel = WorkspaceChannel(self.backend)
+                manager.create_session(
+                    platform="linux", channel=channel, active=True
+                )
+            except Exception as exc:
+                if channel is not None:
+                    channel.close()
+                self.close()
+                raise WorkspaceError(
+                    "Could not open the pwncat console over the workspace SSH account: "
+                    + safe_text(exc)
+                ) from exc
+
+        try:
+            self._manager.interactive(confirm_exit=False)
+        except InteractiveExit:
+            pass
+
+        reason = self.state.exit_reason or "resume"
+        if reason == "connection-lost" or not self.backend.connection.active():
+            self.close()
+            raise ConnectionLost("SSH disconnected; the console was not replayed.")
+        if reason == "detach":
+            self.close()
+        return reason

@@ -1,0 +1,235 @@
+"""Workspace actions as normal pwncat ``CommandDefinition`` objects.
+
+They are registered into ``manager.parser.commands`` by
+``WorkspaceConsole._run_pwncat_console`` and therefore appear in ``help``,
+tab-complete, and share the same history, aliases and key bindings as ``run``,
+``search``, ``use``, ``set``, ``sessions``, ``enumerate``, ``escalate``,
+``persist`` and ``implant``.
+
+Implementation is delegated to the existing ``WorkspaceConsole`` methods
+(``forward``, ``status``, ``selected``, ``local_path``) and to the module-level
+``print_panes`` / ``transfer`` helpers, imported lazily to avoid an import
+cycle with ``console.py``.
+
+``upload`` and ``download`` are inserted before pwncat's own versions so the
+workspace guarantees (SFTP staging, atomic rename, SHA-256 verification,
+``--overwrite``) are kept.  ``lcd`` / ``lpwd`` / ``help`` are not registered:
+pwncat's versions govern the local transfer directory and the full command
+index.
+"""
+from __future__ import annotations
+
+from pwncat.commands import CommandDefinition, Complete, Parameter
+from pwncat.manager import InteractiveExit
+from pwncat.util import console
+from pwncat.workspace import WorkspaceError
+from pwncat.workspace.console_ui import colors_enabled, output_console
+from pwncat.workspace.model import pane_id, safe_text
+
+class _Base(CommandDefinition):
+    LOCAL = True
+
+    @property
+    def console(self):
+        return self.manager.workspace_console
+
+    @property
+    def state(self):
+        return self.manager.workspace_state
+
+    @property
+    def backend(self):
+        return self.manager.workspace_backend
+
+class ForwardCommand(_Base):
+    """Manage local forwards to services on the connected SSH host.
+
+    ``forward add LOCAL_PORT [SERVER_IP] REMOTE_PORT`` forwards
+    ``127.0.0.1:LOCAL_PORT`` to ``SERVER_IP:REMOTE_PORT`` through the existing
+    authenticated SSH connection.  ``SERVER_IP`` defaults to ``127.0.0.1`` and
+    must be a loopback address or the connected SSH peer's IP.
+    ``forward list`` shows active forwards, clients and saved settings.
+    ``forward stop LOCAL_PORT`` also removes the saved setting.
+    """
+
+    PROG = "forward"
+    ARGS = {
+        "action": Parameter(
+            Complete.CHOICES,
+            metavar="ACTION",
+            choices=["add", "list", "stop"],
+            help="add / list / stop",
+        ),
+        "args": Parameter(Complete.NONE, nargs="*", metavar="ARG"),
+    }
+
+    def run(self, manager, args):
+        self.console.forward([args.action, *args.args])
+
+class PanesCommand(_Base):
+    """List panes across all windows; * marks the selected pane."""
+
+    PROG = "panes"
+    ARGS = {}
+
+    def run(self, manager, args):
+        from pwncat.workspace.console import print_panes
+
+        print_panes(
+            self.backend,
+            self.state.selected,
+            console=output_console(self.state),
+        )
+
+class SelectCommand(_Base):
+    """Select a pane across windows for resume, split and status."""
+
+    PROG = "select"
+    ARGS = {"pane": Parameter(Complete.NONE, metavar="%ID")}
+
+    def run(self, manager, args):
+        pane = pane_id(args.pane)
+        self.backend.select(pane)
+        self.state.selected = pane
+        self.console.message("Selected " + pane, "green")
+
+class SplitCommand(_Base):
+    """Split the selected (or specified) pane; the new pane is selected."""
+
+    PROG = "split"
+    ARGS = {
+        "pane": Parameter(Complete.NONE, nargs="?", metavar="%ID"),
+        "direction": Parameter(
+            Complete.CHOICES,
+            nargs="?",
+            choices=["horizontal", "vertical"],
+            default="horizontal",
+        ),
+    }
+
+    def run(self, manager, args):
+        target = pane_id(args.pane) if args.pane else self.console.selected().id
+        result = self.backend.split(target, args.direction)
+        if len(result) != 1:
+            raise WorkspaceError(
+                "Split was requested; inspect 'panes' before repeating."
+            )
+        self.state.selected = pane_id(result[0].decode("ascii", "strict"))
+        self.console.message("Created " + self.state.selected, "green")
+
+class WindowCommand(_Base):
+    """Create a window and select its first pane."""
+
+    PROG = "window"
+    ARGS = {"title": Parameter(Complete.NONE, nargs="?")}
+
+    def run(self, manager, args):
+        self.state.selected = self.backend.new_window(args.title)
+        self.console.message("Created " + self.state.selected, "green")
+
+class StatusCommand(_Base):
+    """Show connection, history policy, and selected pane context."""
+
+    PROG = "status"
+    ARGS = {}
+
+    def run(self, manager, args):
+        self.console.status()
+
+class UploadCommand(_Base):
+    """Upload through the workspace SSH account (SFTP, SHA-256 verified)."""
+
+    PROG = "upload"
+    ARGS = {
+        "source": Parameter(Complete.LOCAL_FILE),
+        "destination": Parameter(Complete.REMOTE_FILE),
+        "--overwrite": Parameter(Complete.NONE, action="store_true"),
+    }
+
+    def run(self, manager, args):
+        from pwncat.workspace.console import transfer
+
+        transfer(
+            self.backend,
+            "upload",
+            self.console.local_path(args.source),
+            args.destination,
+            args.overwrite,
+            console=output_console(self.state),
+        )
+
+class DownloadCommand(_Base):
+    """Download through the workspace SSH account (SFTP, SHA-256 verified)."""
+
+    PROG = "download"
+    ARGS = {
+        "source": Parameter(Complete.REMOTE_FILE),
+        "destination": Parameter(Complete.LOCAL_FILE),
+        "--overwrite": Parameter(Complete.NONE, action="store_true"),
+    }
+
+    def run(self, manager, args):
+        from pwncat.workspace.console import transfer
+
+        transfer(
+            self.backend,
+            "download",
+            args.source,
+            self.console.local_path(args.destination),
+            args.overwrite,
+            console=output_console(self.state),
+        )
+
+class ColorCommand(_Base):
+    """Control console colours (auto / on / off); 'on' overrides NO_COLOR."""
+
+    PROG = "color"
+    ARGS = {
+        "mode": Parameter(
+            Complete.CHOICES, nargs="?", choices=["auto", "on", "off"]
+        )
+    }
+
+    def run(self, manager, args):
+        if args.mode:
+            self.state.color_mode = args.mode
+        self.console.message(
+            f"Colors: {self.state.color_mode} "
+            f"({'enabled' if colors_enabled(self.state) else 'disabled'}).",
+            "bold magenta",
+        )
+
+class ResumeCommand(_Base):
+    """Return to tmux, keeping the console and its active session open."""
+
+    PROG = "resume"
+    ARGS = {}
+
+    def run(self, manager, args):
+        self.backend.select(self.console.selected().id)
+        self.state.exit_reason = "resume"
+        raise InteractiveExit
+
+class DetachCommand(_Base):
+    """Leave the workspace; remote processes and tmux keep running."""
+
+    PROG = "detach"
+    ARGS = {}
+
+    def run(self, manager, args):
+        self.state.exit_reason = "detach"
+        raise InteractiveExit
+
+WORKSPACE_COMMANDS = [
+    ForwardCommand,
+    PanesCommand,
+    SelectCommand,
+    SplitCommand,
+    WindowCommand,
+    StatusCommand,
+    UploadCommand,
+    DownloadCommand,
+    ColorCommand,
+    ResumeCommand,
+    DetachCommand,
+]

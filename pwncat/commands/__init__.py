@@ -936,7 +936,7 @@ class CommandCompleter(Completer):
                             self.layers[command.PROG][2][name] = completer
                             option_names.append(name)
                 self.layers[command.PROG][0] = WordCompleter(
-                    option_names + ["--help", "-h"],
+                    option_names + ["--help", "-h"], WORD=True,
                 )
 
         self.completer = WordCompleter(list(self.layers))
@@ -1022,7 +1022,11 @@ class CommandCompleter(Completer):
             completer = command[1][0]
             if isinstance(completer, tuple) and completer[0] == "choices":
                 completer = WordCompleter(completer[1], WORD=True)
-            next_completer = merge_completers([next_completer, completer])
+            # Complete.NONE leaves no positional completer. prompt_toolkit
+            # requires every merged entry to be an actual Completer instance.
+            next_completer = merge_completers(
+                [item for item in (next_completer, completer) if item is not None]
+            )
 
         if isinstance(this_completer, tuple) and this_completer[0] == "choices":
             this_completer = WordCompleter(this_completer[1], WORD=True)

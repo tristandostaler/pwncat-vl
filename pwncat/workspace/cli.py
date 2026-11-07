@@ -8,6 +8,7 @@ import os
 import random
 import sys
 import time
+import warnings
 from dataclasses import replace
 
 from . import ConnectionLost, WorkspaceError
@@ -89,7 +90,7 @@ def parser(*, saved_name=False):
     root = argparse.ArgumentParser(
         prog="pwncat-vl workspace",
         description="Persistent panes on an authenticated SSH host.",
-        epilog="Saved shortcuts: pwncat-vl workspace attach NAME | workspace list | workspace edit NAME --host HOST | workspace forget NAME. "
+        epilog="Saved shortcuts: pwncat-vl workspace attach NAME | workspace list | workspace edit NAME [--host HOST] [--username USER] [--password] | workspace forget NAME. "
         "A successful connection with an explicit host saves its connection settings locally.",
     )
     if saved_name:
@@ -116,7 +117,8 @@ def parser(*, saved_name=False):
     new.add_argument("--history-limit", type=int, default=50000)
     new.add_argument("--no-attach", action="store_true")
     attach = actions.add_parser(
-        "attach", help="Attach to an existing workspace; never recreate it"
+        "attach",
+        help="Attach to a workspace; recover a saved workspace after a server reset",
     )
     attach.add_argument("name")
     attach.add_argument(
@@ -162,14 +164,23 @@ def parser(*, saved_name=False):
     )
     archive.add_argument("name")
     edit = actions.add_parser(
-        "edit", help="Change a saved workspace's hostname locally"
+        "edit",
+        help="Change a saved workspace's host, username, or saved password locally",
     )
     edit.add_argument("name", help="Saved local workspace name")
     edit.add_argument(
         "--host",
         dest="new_hostname",
-        required=True,
         help="New hostname or IP address; retain the SSH username and port",
+    )
+    edit.add_argument(
+        "--username", "--user", dest="new_username", help="New SSH username"
+    )
+    edit.add_argument(
+        "--password",
+        dest="edit_password",
+        action="store_true",
+        help="Privately prompt for a replacement password and save it in the OS credential store",
     )
     forget = actions.add_parser(
         "forget", help="Remove a local shortcut; leave the remote workspace intact"
@@ -330,6 +341,25 @@ def forget_credentials(store, alias):
         store.save(replace(saved, credential_ref=None))
 
 
+def read_replacement_password():
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            password = getpass.getpass("New SSH password: ")
+            confirmation = getpass.getpass("Confirm SSH password: ")
+    except getpass.GetPassWarning:
+        raise WorkspaceError(
+            "Run the password edit in a terminal with hidden input."
+        ) from None
+    if not password:
+        raise WorkspaceError("Password was empty; saved settings were not changed.")
+    if password != confirmation:
+        raise WorkspaceError(
+            "Passwords did not match; saved settings were not changed."
+        )
+    return password
+
+
 def list_saved(store):
     names = store.names()
     if not names:
@@ -379,6 +409,7 @@ def interact(
     )
     restore_pending = forward_settings is not None
     mode = "console" if start_console else "display"
+    workspace_console = WorkspaceConsole(backend, state)
     print(
         "Ctrl+B: tmux controls. Ctrl+G then p: workspace console. Ctrl+G then d: detach. Ctrl+] also works."
     )
@@ -395,7 +426,7 @@ def interact(
                         print("Saved forwards could not be restored: " + safe_text(exc))
                     restore_pending = False
                 if mode == "console":
-                    if WorkspaceConsole(backend, state).run() == "detach":
+                    if workspace_console.run() == "detach":
                         return
                     mode = "display"
                 else:
@@ -405,6 +436,7 @@ def interact(
                         return
                     mode = "console"
             except ConnectionLost:
+                workspace_console.close()
                 backend.close()
                 backend.connection.close()
                 deadline = time.monotonic() + reconnect_seconds
@@ -429,6 +461,7 @@ def interact(
                         replacement = TmuxWorkspace(connection)
                         replacement.load(expected.name, expected=expected)
                         backend = replacement
+                        workspace_console = WorkspaceConsole(backend, state)
                         restore_pending = forward_settings is not None
                         break
                     except ConnectionLost:
@@ -438,8 +471,11 @@ def interact(
                         connection.close()
                         raise
     finally:
-        backend.close()
-        backend.connection.close()
+        try:
+            workspace_console.close()
+        finally:
+            backend.close()
+            backend.connection.close()
 
 
 def main(argv=None):
@@ -472,24 +508,38 @@ def main(argv=None):
                 )
             ):
                 raise WorkspaceError(
-                    "Use 'workspace edit NAME --host HOST' without connection options. "
-                    "This command only edits the saved local hostname."
+                    "Use 'workspace edit NAME [--host HOST] [--username USER] [--password]' "
+                    "without connection options. This command only edits saved local settings."
                 )
-            saved, changed, cleared = store.edit_hostname(args.name, args.new_hostname)
-            if not changed:
-                print("Hostname is unchanged.")
-                return 0
-            print(
-                f"Saved hostname for '{saved.alias}': {safe_text(saved.connection.host)}"
+            saved, changed, migrated = store.edit_connection(
+                args.name,
+                hostname=args.new_hostname,
+                username=args.new_username,
+                password_reader=read_replacement_password
+                if args.edit_password
+                else None,
             )
-            print("Workspace identity and console history were retained.")
-            if cleared:
+            if not changed:
+                print("Saved connection settings are unchanged.")
+                return 0
+            if args.new_hostname is not None:
                 print(
-                    "Saved credentials were removed because the hostname changed. "
-                    f"Save them again with: pwncat-vl workspace attach {saved.alias} --save-credentials"
+                    f"Saved hostname for '{saved.alias}': {safe_text(saved.connection.host)}"
                 )
-            else:
-                print(f"Reconnect with: pwncat-vl workspace attach {saved.alias}")
+            if args.new_username is not None:
+                print(
+                    f"Saved username for '{saved.alias}': {safe_text(saved.connection.user)}"
+                )
+            if args.edit_password:
+                print(
+                    "Password saved in the system credential store; it will be used on the next connection."
+                )
+            if migrated:
+                print(
+                    "Saved credentials were retained for the updated connection settings."
+                )
+            print("Workspace identity and console history were retained.")
+            print(f"Reconnect with: pwncat-vl workspace attach {saved.alias}")
             return 0
         if args.save_credentials and (
             args.action in ("list", "forget", "forget-credentials")
@@ -601,7 +651,11 @@ def main(argv=None):
                 )
             print(f"Name '{remote_name}' is available for a new workspace.")
         else:
-            backend.load(remote_name, expected=expected)
+            recovered = False
+            if args.action in ("attach", "console") and expected is not None:
+                recovered = backend.attach_or_recover(remote_name, expected)
+            else:
+                backend.load(remote_name, expected=expected)
             remember_connection(
                 store,
                 alias,
@@ -612,7 +666,12 @@ def main(argv=None):
                 passphrase_prompt,
                 reference,
                 vault,
+                replace_identity=recovered,
             )
+            if recovered:
+                print(
+                    "The previous remote workspace was gone or stopped. Started a fresh workspace; any surviving files were archived."
+                )
             if args.host is not None and args.action in ("attach", "console"):
                 print(f"Saved local workspace '{alias}'.")
             if args.action == "attach":

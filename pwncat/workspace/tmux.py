@@ -7,7 +7,14 @@ import re
 import shlex
 import uuid
 
-from . import ConnectionLost, IdentityMismatch, OutcomeUnknown, WorkspaceError
+from . import (
+    ConnectionLost,
+    IdentityMismatch,
+    OutcomeUnknown,
+    WorkspaceError,
+    WorkspaceMissing,
+    WorkspaceStopped,
+)
 from .model import Pane, WorkspaceRef, pane_id
 from .protocol import ControlClient, command_line
 from .state import StateStore
@@ -62,7 +69,7 @@ class TmuxWorkspace:
             # This query is read-only. No workspace mutation was submitted.
             raise ConnectionLost("Workspace identity check was interrupted.") from exc
         if status:
-            raise WorkspaceError(
+            raise WorkspaceStopped(
                 "Workspace is not running. It was not recreated; saved history is unchanged."
             )
         values = output.decode("ascii", "strict").strip().split()
@@ -87,6 +94,30 @@ class TmuxWorkspace:
             )
         self.ref = ref
         return ref
+
+    def attach_or_recover(self, name, expected):
+        """Reattach, or start fresh after a reset; preserve any stopped state."""
+        try:
+            self.load(name, expected=expected)
+            return False
+        except WorkspaceMissing:
+            self.create(name)
+        except WorkspaceStopped:
+            manifest = self.store.load(name)
+            history_limit = manifest.get("history_limit", 50000)
+            if type(history_limit) is not int or not 100 <= history_limit <= 200000:
+                raise WorkspaceError(
+                    "Invalid saved history limit; existing files were preserved."
+                )
+            # Archive verifies the saved identity, stopped socket and process
+            # before moving any existing files. Other errors never recreate.
+            self.archive(name, expected=expected)
+            self.create(
+                name,
+                history=manifest["history"],
+                history_limit=history_limit,
+            )
+        return True
 
     def create(self, name, *, history="memory", history_limit=50000):
         if history not in ("memory", "private") or not 100 <= history_limit <= 200000:

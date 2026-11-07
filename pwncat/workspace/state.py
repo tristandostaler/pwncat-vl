@@ -9,7 +9,7 @@ import re
 import stat
 import uuid
 
-from . import WorkspaceError
+from . import WorkspaceError, WorkspaceMissing
 from .model import workspace_name
 
 
@@ -24,7 +24,14 @@ class StateStore:
                 "Remote home must be an absolute path without control characters."
             )
         self.sftp, self.uid = sftp, uid
-        home_attrs = sftp.lstat(home)
+        try:
+            home_attrs = sftp.lstat(home)
+        except OSError as exc:
+            if missing(exc):
+                raise WorkspaceError(
+                    f"Remote SSH home directory is missing: {home}"
+                ) from exc
+            raise
         if (
             not stat.S_ISDIR(home_attrs.st_mode)
             or home_attrs.st_uid != uid
@@ -114,11 +121,26 @@ class StateStore:
         return destination
 
     def load(self, name):
-        self.private_directory(self.root)
         directory = self.directory(name)
-        self.private_directory(directory)
+        try:
+            self.private_directory(self.root)
+            self.private_directory(directory)
+        except OSError as exc:
+            if missing(exc):
+                raise WorkspaceMissing(
+                    f"Remote workspace directory is missing: {directory}. "
+                    "Attach using the saved local name to start a fresh workspace."
+                ) from exc
+            raise
         path = posixpath.join(directory, "manifest.json")
-        attrs = self.sftp.lstat(path)
+        try:
+            attrs = self.sftp.lstat(path)
+        except OSError as exc:
+            if missing(exc):
+                raise WorkspaceError(
+                    f"Remote workspace metadata is missing: {path}. Existing files were preserved."
+                ) from exc
+            raise
         if (
             not stat.S_ISREG(attrs.st_mode)
             or attrs.st_uid != self.uid

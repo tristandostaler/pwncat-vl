@@ -1040,19 +1040,32 @@ class Manager:
         sys.excepthook = lambda _, __, ___: None
         pwnlib.term.term_mode = False
 
-    def interactive(self):
-        """Start interactive prompt"""
+    def interactive(self, *, confirm_exit: bool = True):
+        """Run the prompt, optionally returning to an owning UI without confirmation."""
 
-        self.interactive_running = True
+        # PromptSession retains its input object between visits. Bind it to
+        # the caller's stream, not the temporary wrapper used for raw input.
+        if self.parser.prompt is None:
+            self.parser.setup_prompt()
 
         # This is required to ensure multi-byte key-sequences are read
-        # properly
-        sys.stdin
-        sys.stdin = TextIOWrapper(
-            os.fdopen(sys.stdin.fileno(), "br", buffering=0),
+        # properly. Own a duplicate descriptor so repeated console visits do
+        # not close the caller's stdin when the previous wrapper is released.
+        original_stdin = sys.stdin
+        with TextIOWrapper(
+            os.fdopen(os.dup(original_stdin.fileno()), "br", buffering=0),
             write_through=True,
             line_buffering=True,
-        )
+        ) as console_stdin:
+            sys.stdin = console_stdin
+            try:
+                self._interactive_loop(confirm_exit=confirm_exit)
+            finally:
+                sys.stdin = original_stdin
+                self.interactive_running = False
+
+    def _interactive_loop(self, *, confirm_exit: bool):
+        self.interactive_running = True
 
         while self.interactive_running:
 
@@ -1063,6 +1076,8 @@ class Manager:
                 try:
                     self.parser.run()
                 except InteractiveExit:
+                    if not confirm_exit:
+                        break
 
                     if self.sessions and not confirm(
                         "There are active sessions. Are you sure?",

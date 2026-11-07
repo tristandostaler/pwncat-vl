@@ -53,9 +53,17 @@ class Command(CommandDefinition):
                 if session is manager.target:
                     ident = "*" + ident
                     kwargs["style"] = "underline"
+                user = session.current_user()
+                if user is None:
+                    # A live account may not have a matching user record.
+                    # Show its identifier without inventing a username.
+                    uid = session.platform.getuid()
+                    user_name = "unknown" if uid is None else f"unknown (ID: {uid})"
+                else:
+                    user_name = user.name
                 table.add_row(
                     str(ident),
-                    session.current_user().name,
+                    user_name,
                     str(session.hash),
                     session.platform.name,
                     str(type(session.platform.channel).__name__),
