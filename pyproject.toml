@@ -48,6 +48,7 @@ rich = ">=10.4,<14"
 ZODB3 = "^3.11"
 Jinja2 = "^3.1"
 paramiko-ng = "~2.9"
+keyring = ">=25.6,<26"
 cryptography = "~43.0"
 pygments = "^2.0"
 sphinx-toolbox = { version = "^3.8", optional = true }

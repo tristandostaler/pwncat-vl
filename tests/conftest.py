@@ -5,8 +5,6 @@ from io import StringIO
 
 import pytest
 
-from pwncat.channel import ChannelError
-
 PLATFORM_MAP = {"ubuntu": "linux", "centos": "linux", "windows": "windows"}
 
 
@@ -44,6 +42,7 @@ def windows_details(request):
 
 
 def session_for(request):
+    from pwncat.channel import ChannelError
 
     # Grab details for this target
     details = connection_details_for(request.param)

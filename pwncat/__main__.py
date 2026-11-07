@@ -8,21 +8,28 @@ from rich import box
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn
 
-import pwncat.manager
-from pwncat.util import console
-from pwncat.channel import ChannelError
-from pwncat.modules import ModuleFailed
-from pwncat.commands import connect
-from pwncat.platform import PlatformError
-
 
 def main():
+
+    # Workspaces have a detach lifecycle and never enter target-shell bootstrap.
+    if sys.argv[1:2] == ["workspace"]:
+        from pwncat.workspace.cli import main as workspace_main
+
+        return workspace_main(sys.argv[2:])
+
+    import pwncat.manager
+    from pwncat.util import console
+    from pwncat.channel import ChannelError
+    from pwncat.modules import ModuleFailed
+    from pwncat.commands import connect
+    from pwncat.platform import PlatformError
 
     # Default log-level is "INFO"
     logging.getLogger().setLevel(logging.INFO)
 
     parser = argparse.ArgumentParser(
         description="""Start interactive pwncat session and optionally connect to existing victim via a known platform and channel type. This entrypoint can also be used to list known implants on previous targets.""",
+        epilog="For persistent SSH panes, use: pwncat-vl workspace --help",
     )
     parser.add_argument(
         "--version", "-v", action="store_true", help="Show version number and exit",
@@ -390,6 +397,4 @@ def main():
 
 if __name__ == "__main__":
 
-    main()
-
-    sys.exit(0)
+    sys.exit(main())

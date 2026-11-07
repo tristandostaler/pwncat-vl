@@ -67,6 +67,7 @@ well. Pull requests are always welcome!
 
     installation.rst
     usage.rst
+    workspace.rst
     windows.rst
     configuration.rst
     modules.rst

@@ -78,6 +78,71 @@ This shows an early version - for current details, refer to this repository.
 
 ### Documentation
 
+For persistent SSH panes, use the opt-in **workspace** command:
+
+```sh
+pwncat-vl workspace user@host new lab --history private
+pwncat-vl workspace attach lab
+pwncat-vl workspace list
+```
+
+The remote host needs tmux 3.3+, Bash, and SFTP. On a first connection, workspace
+mode displays the SSH host key's SHA-256 fingerprint. Verify it and type `yes`
+to save the key in `~/.ssh/known_hosts` (or the file selected by `--known-hosts`).
+Changed keys are rejected; noninteractive connections require an already trusted key.
+`--history private` saves plaintext shell history in owner-only files; omit it
+to retain history only in the live workspace. `Ctrl+B` controls tmux;
+`Ctrl+G` then `p` opens the workspace console; `Ctrl+G` then `d` detaches.
+`Ctrl+]` remains available as an alternative prefix.
+The console provides `help`, `status`, `panes`, `select`, `split`, `window`,
+`upload`, `download`, `forward`, `color`, `lcd`, `lpwd`, `resume`, and `detach`.
+It uses pwncat's colored prompt with an explicit workspace label, syntax
+highlighting, contextual Tab completion, history suggestions, and a status bar.
+Successful console commands are saved privately per workspace and recalled after
+reopening it. Start a command with a space to keep it out of saved history.
+`Ctrl+Q` returns to the pane. Use `color on` to override a terminal's `NO_COLOR`
+setting, or `color auto` to follow terminal settings.
+Inside the console, `forward add 8080 8000` connects local `127.0.0.1:8080` to
+`127.0.0.1:8000` on the SSH host using the current connection. Use `forward list`
+and `forward stop 8080` to manage it. Forwards close when this client disconnects.
+You can specify the destination explicitly with `forward add 8080 SERVER_IP 80`.
+`SERVER_IP` must be a loopback address or the IP used by the current SSH connection.
+Open it directly with `pwncat-vl workspace console lab`. Successful connections
+save the server and authentication settings locally. To also save authentication
+secrets in the native OS credential store:
+
+```sh
+pwncat-vl workspace attach lab --save-credentials
+pwncat-vl workspace attach lab
+pwncat-vl workspace forget-credentials lab
+```
+
+This uses macOS Keychain, Windows Credential Manager, or Linux Secret Service/
+KWallet. WSL uses its Linux credential service. The OS may ask to unlock or allow
+access to its vault. Without `--save-credentials`, password profiles prompt on
+each connection. Secrets are never saved in workspace JSON files.
+
+To update a saved workspace's hostname or IP address:
+
+```sh
+pwncat-vl workspace edit lab --host new-host.example
+pwncat-vl workspace attach lab
+```
+
+This local edit preserves the workspace identity and console history. Saved
+credentials are cleared when the hostname changes; add `--save-credentials` on
+the next attachment to save them again. SSH host key checks still apply.
+
+To reuse a stopped workspace name while retaining its saved files:
+
+```sh
+pwncat-vl workspace archive lab
+pwncat-vl workspace new lab
+```
+
+See [the workspace guide](docs/source/workspace.rst) for transfers, recovery,
+requirements, and limitations. Existing pwncat session commands remain separate.
+
 Official documentation for the original project was hosted on Read the Docs.
 This fork does not (yet) include RTD integration, but usage remains very similar. Updated instructions are in progress.
 

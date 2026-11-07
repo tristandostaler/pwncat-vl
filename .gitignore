@@ -14,3 +14,52 @@ pwncat.sqlite-journal
 linpeas.txt
 NOTES.md
 db/pwncat*
+
+# Local secrets and authentication exports (keep example environment files).
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+cookies*.txt
+cookies*.json
+.netrc
+_netrc
+.credentials
+.credentials.*
+credentials.json
+secrets.json
+/credentials/
+/secrets/
+
+# SSH metadata and private key material.
+.ssh/
+known_hosts
+known_hosts.*
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+id_ecdsa_sk
+id_ed25519_sk
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local workspace profiles, console history, and copied remote workspace state.
+.pwncat-workspaces/
+.config/pwncat/
+.config/pwncat-vl/
+/workspaces/
+.history-*.json
+.pwncat_history
+# Also ignore any custom PWNCAT_WORKSPACE_CONFIG directory inside this checkout.
+
+# Runtime databases, their sidecars, and logs can contain session data.
+*.db
+*.db-*
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log

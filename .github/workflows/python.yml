@@ -31,3 +31,61 @@ jobs:
 
       - name: Run tests with pytest
         run: python -m pytest
+
+  workspace:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    env:
+      PWNCAT_REQUIRE_TMUX: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install tmux on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install tmux on macOS
+        if: runner.os == 'macOS'
+        run: brew list tmux || brew install tmux
+      - name: Install test dependencies
+        run: python -m pip install . pytest pycryptodome
+      - name: Test SSH workspace with real tmux
+        run: python -m pytest tests/test_workspace.py tests/test_workspace_integration.py
+
+  workspace-credentials:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install . pytest pycryptodome
+      - name: Test credential workflows and portable workspace entrypoint
+        run: python -m pytest tests/test_workspace_credentials.py tests/test_workspace_hostkeys.py tests/test_workspace_forwarding.py tests/test_workspace_console_ui.py tests/test_workspace_console_history.py tests/test_workspace_edit.py
+      - name: Test native credential store with disposable data
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        timeout-minutes: 2
+        env:
+          PWNCAT_TEST_NATIVE_CREDENTIALS: "1"
+        run: python -m pytest tests/test_workspace_credentials.py::test_native_vault_with_disposable_fixture
+      - name: Install Linux credential service for testing
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring
+      - name: Test Linux Secret Service with disposable data
+        if: runner.os == 'Linux'
+        timeout-minutes: 2
+        env:
+          PWNCAT_TEST_NATIVE_CREDENTIALS: "1"
+        run: |
+          dbus-run-session -- bash -c '
+            printf "%s\n" "disposable-ci-keyring" | gnome-keyring-daemon --unlock --components=secrets
+            python -m pytest tests/test_workspace_credentials.py::test_native_vault_with_disposable_fixture
+          '
