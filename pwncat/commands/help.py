@@ -6,7 +6,7 @@ from rich.table import Table, Column
 
 import pwncat
 from pwncat.util import console
-from pwncat.commands import Complete, Parameter, CommandDefinition
+from pwncat.commands import Complete, Parameter, CommandDefinition, GroupCommand
 
 
 class Command(CommandDefinition):
@@ -14,27 +14,29 @@ class Command(CommandDefinition):
     List known commands and print their associated help documentation.
     """
 
-    def get_command_names(self):
-        try:
-            # Because we are initialized prior to `manager.parser`,
-            # we have to wrap this in a try-except block.
-            yield from [cmd.PROG for cmd in self.manager.parser.commands]
-        except AttributeError:
-            return
-
     PROG = "help"
-    ARGS = {"topic": Parameter(Complete.CHOICES, choices=get_command_names, nargs="?")}
+    ARGS = {"topic": Parameter(Complete.NONE, nargs="*", metavar="COMMAND")}
     LOCAL = True
 
     def run(self, manager: "pwncat.manager.Manager", args):
         if args.topic:
             for command in manager.parser.commands:
-                if args.topic == command.PROG:
+                if args.topic[0] == command.PROG:
+                    if isinstance(command, GroupCommand):
+                        command.show_help(args.topic[1:])
+                        return
+                    if len(args.topic) > 1:
+                        console.log(
+                            f"[red]error[/red]: {command.PROG}: no subcommand "
+                            f"{' '.join(args.topic[1:])}"
+                        )
+                        return
                     if command.parser is not None:
                         command.parser.print_help()
                     else:
                         console.print(textwrap.dedent(command.__doc__).strip())
-                    break
+                    return
+            console.log(f"[red]error[/red]: {args.topic[0]}: unknown command")
         else:
             table = Table(
                 Column("Command", style="green"),
@@ -42,7 +44,14 @@ class Command(CommandDefinition):
                 box=rich.box.SIMPLE,
             )
 
+            grouped_names = {
+                route.command for group in manager.parser.commands
+                if isinstance(group, GroupCommand)
+                for route in group.ROUTES.values()
+            }
             for command in manager.parser.commands:
+                if command.PROG in grouped_names:
+                    continue
                 doc = command.__doc__
                 if doc is None:
                     doc = ""

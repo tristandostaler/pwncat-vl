@@ -47,6 +47,7 @@ import pkgutil
 import termios
 import argparse
 import importlib.util
+from dataclasses import dataclass
 from io import TextIOWrapper
 from enum import Enum, auto
 from functools import partial
@@ -164,12 +165,15 @@ def get_module_choices(command):
     if command.manager.target is None:
         return
 
-    yield from [
-        module.name.removeprefix("agnostic.").removeprefix(
-            command.manager.target.platform.name + ".",
+    seen = set()
+    for module in command.manager.target.find_module("*"):
+        short_name = module.name.removeprefix("agnostic.").removeprefix(
+            command.manager.target.platform.name + "."
         )
-        for module in command.manager.target.find_module("*")
-    ]
+        for name in (short_name, module.name):
+            if name not in seen:
+                seen.add(name)
+                yield name
 
 
 class Parameter:
@@ -341,6 +345,127 @@ class CommandDefinition:
             group.add_argument(*names, *param.args, **param.kwargs)
 
         parser.set_defaults(**self.DEFAULTS)
+
+
+@dataclass(frozen=True)
+class CommandRoute:
+    """A grouped path backed by an existing console command."""
+
+    command: str
+    args: tuple[str, ...] = ()
+    summary: str = ""
+    usage: str | None = None
+
+
+class GroupCommand(CommandDefinition):
+    """Dispatch named subcommands while retaining their original handlers."""
+
+    ARGS = None
+    LOCAL = True
+    ROUTES: dict[tuple[str, ...], CommandRoute] = {}
+    GROUP_SUMMARIES: dict[tuple[str, ...], str] = {}
+
+    def _command(self, name):
+        return next((item for item in self.manager.parser.commands if item.PROG == name), None)
+
+    def children(self, path=()):
+        """Names available immediately below a grouped command path."""
+        depth = len(path)
+        return sorted({
+            route[depth] for route in self.ROUTES
+            if route[:depth] == tuple(path) and len(route) > depth
+        })
+
+    def show_help(self, path=()):
+        """Show a group's next actions or one leaf command's full help."""
+        path = tuple(path)
+        route = self.ROUTES.get(path)
+        if route is not None:
+            if route.usage is not None:
+                console.print(f"usage: {route.usage}\n\n{route.summary}")
+                return
+            command = self._command(route.command)
+            if command is None:
+                self.manager.log(f"[red]error[/red]: {route.command}: unavailable")
+                return
+            if command.parser is not None:
+                original = command.parser.prog
+                command.parser.prog = " ".join((self.PROG, *path))
+                try:
+                    command.parser.print_help()
+                finally:
+                    command.parser.prog = original
+            else:
+                console.print(command.__doc__ or "")
+            return
+        children = self.children(path)
+        if not children:
+            self.manager.log(
+                f"[red]error[/red]: {' '.join((self.PROG, *path))}: unknown command"
+            )
+            return
+        console.print("[bold]" + " ".join((self.PROG, *path)) + "[/bold] commands:")
+        for child in children:
+            child_path = (*path, child)
+            details = self.ROUTES.get(child_path)
+            summary = (
+                details.summary if details is not None
+                else self.GROUP_SUMMARIES.get(child_path, "")
+            )
+            console.print(f"  {' '.join((self.PROG, *child_path))}  {summary}")
+
+    def routed_arguments(self, path, arguments):
+        """Allow a group to validate the shape of a route's own arguments."""
+        return arguments
+
+    def run(self, manager, args):
+        try:
+            tokens = shlex.split(args)
+        except ValueError as exc:
+            manager.log(f"[red]error[/red]: {exc}")
+            return
+        if not tokens or tokens[0] in ("help", "-h", "--help"):
+            self.show_help(tokens[1:] if tokens else ())
+            return
+        if tokens[-1] in ("-h", "--help"):
+            path = tuple(tokens[:-1])
+            if path in self.ROUTES or self.children(path):
+                self.show_help(path)
+                return
+            for count in range(len(path) - 1, 0, -1):
+                if path[:count] in self.ROUTES:
+                    self.show_help(path[:count])
+                    return
+        for count in range(len(tokens), 0, -1):
+            path = tuple(tokens[:count])
+            route = self.ROUTES.get(path)
+            if route is not None:
+                break
+        else:
+            self.show_help(tokens)
+            return
+        command = self._command(route.command)
+        if command is None:
+            manager.log(f"[red]error[/red]: {route.command}: unavailable")
+            return
+        if manager.target is None and not command.LOCAL:
+            manager.log("[red]error[/red]: active session required")
+            return
+        try:
+            supplied = self.routed_arguments(path, tokens[len(path):])
+        except ValueError as exc:
+            manager.log(f"[red]error[/red]: {exc}")
+            return
+        arguments = [*route.args, *supplied]
+        if command.parser is None:
+            command.run(manager, shlex.join(arguments))
+            return
+        original = command.parser.prog
+        command.parser.prog = " ".join((self.PROG, *path))
+        try:
+            command.run(manager, command.parser.parse_args(arguments))
+        finally:
+            command.parser.prog = original
 
 
 def resolve_blocks(source: str):
@@ -819,6 +944,17 @@ class CommandLexer(RegexLexer):
                 ),
             )
             mode = []
+            if isinstance(command, GroupCommand):
+                paths = set(command.ROUTES)
+                paths.update(
+                    path[:index] for path in command.ROUTES
+                    for index in range(1, len(path))
+                )
+                for path in sorted(paths, key=lambda item: (-len(item), item)):
+                    mode.append((
+                        r"\s+" + r"\s+".join(map(re.escape, path)) + r"(?=\s|$)",
+                        token.Name.Label,
+                    ))
             if command.ARGS is not None:
                 for args, param in command.ARGS.items():
                     for arg in args.split(","):
@@ -912,6 +1048,10 @@ class CommandCompleter(Completer):
         """Construct a new command completer"""
 
         self.layers = {}
+        self.groups = {
+            command.PROG: command for command in commands
+            if isinstance(command, GroupCommand)
+        }
         local_file_completer = LocalPathCompleter()
         remote_file_completer = RemotePathCompleter(manager)
 
@@ -939,7 +1079,53 @@ class CommandCompleter(Completer):
                     option_names + ["--help", "-h"], WORD=True,
                 )
 
-        self.completer = WordCompleter(list(self.layers))
+        grouped_names = {
+            route.command for group in self.groups.values()
+            for route in group.ROUTES.values()
+        }
+        self.visible_commands = [
+            name for name in self.layers if name not in grouped_names
+        ]
+        self.completer = WordCompleter(self.visible_commands)
+
+    def _group_completions(self, document, complete_event, text, args, *, help_mode=False):
+        """Complete a group path, then delegate leaf arguments to its old command."""
+        group = self.groups[args[0]]
+        complete = args[1:] if text.endswith(" ") else args[1:-1]
+        fragment = "" if text.endswith(" ") else args[-1]
+        for count in range(len(complete), 0, -1):
+            path = tuple(complete[:count])
+            route = group.ROUTES.get(path)
+            if route is None:
+                continue
+            if help_mode:
+                return
+            remainder = text
+            for word in (group.PROG, *path):
+                remainder = remainder.lstrip()[len(word):]
+            target_text = route.command + remainder
+            if route.args:
+                target_text = route.command + " " + shlex.join(route.args) + remainder
+            yield from self.get_completions(Document(target_text), complete_event)
+            return
+        for child in (*group.children(complete), "--help", "-h"):
+            if child.startswith(fragment):
+                yield Completion(child, start_position=-len(fragment))
+
+    def _help_completions(self, complete_event, text, args):
+        remaining = text[len("help"):].lstrip()
+        if not remaining or len(args) == 1 or (len(args) == 2 and not text.endswith(" ")):
+            fragment = "" if text.endswith(" ") else args[-1]
+            for name in self.visible_commands:
+                if name.startswith(fragment):
+                    yield Completion(name, start_position=-len(fragment))
+            return
+        group_name = args[1]
+        if group_name in self.groups:
+            yield from self._group_completions(
+                Document(remaining), complete_event,
+                remaining, shlex.split(remaining), help_mode=True,
+            )
 
     def get_completions(
         self, document: Document, complete_event: CompleteEvent,
@@ -959,6 +1145,16 @@ class CommandCompleter(Completer):
         # commands
         if text == "" or (len(args) == 1 and not text.endswith(" ")):
             yield from self.completer.get_completions(document, complete_event)
+            return
+
+        if args[0] == "help":
+            yield from self._help_completions(complete_event, text, args)
+            return
+
+        if args[0] in self.groups:
+            yield from self._group_completions(
+                document, complete_event, text, args,
+            )
             return
 
         # Not in a known command, can't autocomplete
@@ -1018,8 +1214,8 @@ class CommandCompleter(Completer):
         # We are completing the first argument. This could be
         # any option argument or the first positional argument.
         # We need to merge them.
-        if not args and text.endswith(" ") and command[1]:
-            completer = command[1][0]
+        if text.endswith(" ") and state == "options" and positional < len(command[1]):
+            completer = command[1][positional]
             if isinstance(completer, tuple) and completer[0] == "choices":
                 completer = WordCompleter(completer[1], WORD=True)
             # Complete.NONE leaves no positional completer. prompt_toolkit

@@ -39,6 +39,7 @@ from .console_history import ConsoleHistory
 from .console_ui import colors_enabled, output_console
 from .files import FileService
 from .background_transfers import BackgroundTransfers, progress_text
+from .background_modules import BackgroundModules
 from .forwarding import LOOPBACK, destination_address, port_number
 from .model import pane_id, safe_text
 from .saved_forwards import SavedForwards, SavedListeners
@@ -67,11 +68,11 @@ COMMANDS = {
     ),
     "window": ("window [TITLE]", "Create a window and select its first pane."),
     "upload": (
-        "upload LOCAL /REMOTE [--overwrite]",
+        "upload LOCAL /REMOTE [--overwrite] [--background|-b]",
         "Upload through the workspace SSH account.",
     ),
     "download": (
-        "download /REMOTE LOCAL [--overwrite]",
+        "download /REMOTE LOCAL [--overwrite] [--background|-b]",
         "Download through the workspace SSH account.",
     ),
     "forward": (
@@ -82,7 +83,10 @@ COMMANDS = {
     "lcd": ("lcd DIRECTORY", "Change the local transfer directory."),
     "resume": ("resume", "Return to the selected remote pane."),
     "detach": ("detach", "Leave the workspace; remote processes keep running."),
-    "transfers": ("transfers", "Show the current or most recent background transfer."),
+    "transfers": (
+        "transfers [upload|download|between|status]",
+        "Upload, download, copy between sessions, or show transfer status.",
+    ),
 }
 
 def message(text, style="", *, console=None):
@@ -215,6 +219,7 @@ class WorkspaceConsole:
         self._manager = None
         self._workspace_session_ready = False
         self.transfers = BackgroundTransfers(on_update=self._refresh_progress)
+        self.modules = BackgroundModules(on_update=self._refresh_progress)
 
     def close(self):
         """Release the console on detach or connection loss, never on resume."""
@@ -251,6 +256,8 @@ class WorkspaceConsole:
         session = self._manager.target
         if session is None:
             raise WorkspaceError("Select an active session before transferring a file.")
+        if self.modules.busy_session(session):
+            raise WorkspaceError("That session is running a background module.")
         from .platform import WorkspaceChannel
 
         fallback = None
@@ -301,6 +308,96 @@ class WorkspaceConsole:
             self.message(
                 f"Transfer {status.number}: failed: {status.error}", "red",
             )
+
+    def start_module(self, name, values, *, raw=False, traceback_requested=False):
+        """Run an opted-in module while the console uses another shell session."""
+        from .platform import WorkspaceChannel
+
+        manager = self._manager
+        session = manager.target
+        if session is None:
+            raise WorkspaceError("Select an active session before running a module.")
+        if self.modules.active():
+            raise WorkspaceError("A module is already running. Use 'module status' to check it.")
+        if self.transfers.busy_session(session):
+            raise WorkspaceError("That session is busy with a background transfer.")
+
+        module = next(session.find_module(name, exact=True), None)
+        if module is None:
+            raise WorkspaceError(f"Module {safe_text(name)} was not found in this session.")
+        manager.reload_if_edited(module.name)
+        module = manager.modules[module.name]
+        if not getattr(module, "BACKGROUND_SAFE", False):
+            raise WorkspaceError(
+                f"{safe_text(module.name)} cannot run in the background. "
+                "It must declare BACKGROUND_SAFE = True after checking that it "
+                "never reads terminal input or changes the active session."
+            )
+
+        fallback = next(
+            (
+                other for other in manager.sessions.values()
+                if other is not session
+                and isinstance(other.platform.channel, WorkspaceChannel)
+                and not self.modules.busy_session(other)
+            ),
+            None,
+        )
+        if fallback is None:
+            channel = WorkspaceChannel(self.backend)
+            try:
+                fallback = manager.create_session(platform="linux", channel=channel)
+            except Exception:
+                channel.close()
+                manager.target = session
+                raise
+
+        config = manager.config.copy()
+        manager.target = fallback
+        try:
+            status = self.modules.start(
+                session, module, values, config, raw=raw,
+                traceback_requested=traceback_requested,
+            )
+        except Exception:
+            manager.target = session
+            raise
+        self.message(
+            f"Started module {status.number} ({status.name}) in session {status.session_id}. "
+            f"Switched to workspace session {fallback.id} while it runs. "
+            "Use 'module status' or 'module result' to check it.",
+            "green",
+        )
+
+    def module_status(self):
+        status = self.modules.status()
+        if status is None:
+            self.message("No background module has been started.", "dim")
+        else:
+            self.message(
+                f"Module {status.number} ({status.name}) in session {status.session_id}: "
+                f"{status.state}" + (f": {status.error}" if status.error else ""),
+                "red" if status.state == "failed" else "cyan",
+            )
+
+    def module_result(self):
+        status = self.modules.status()
+        if status is None or status.state == "running":
+            self.module_status()
+            return
+        if status.state == "failed":
+            self.module_status()
+            if status.traceback_requested and status.traceback:
+                output_console(self.state).print(Text(status.traceback))
+            return
+        run_command = next(
+            command for command in self._manager.parser.commands
+            if command.PROG == "run"
+        )
+        run_command.display_result(
+            self._manager, status.name, status.result,
+            raw=status.raw, session=status.session,
+        )
 
     def detail(self, label, value):
         detail(label, value, console=output_console(self.state))
@@ -444,21 +541,32 @@ class WorkspaceConsole:
             self.state.local_directory = directory
             print(safe_text(directory))
         elif command in ("upload", "download"):
-            if len(args) not in (2, 3) or (len(args) == 3 and args[2] != "--overwrite"):
+            options = args[2:]
+            background = "--background" in options or "-b" in options
+            overwrite = "--overwrite" in options
+            if (
+                len(args) < 2
+                or len(options) != len(set(options))
+                or ("--background" in options and "-b" in options)
+                or any(option not in ("--overwrite", "--background", "-b") for option in options)
+            ):
                 self.usage(command)
             source, destination = args[:2]
             if command == "upload":
                 source = self.local_path(source)
             else:
                 destination = self.local_path(destination)
-            transfer(
-                self.backend,
-                command,
-                source,
-                destination,
-                len(args) == 3,
-                console=output_console(self.state),
-            )
+            if background:
+                self.start_transfer(command, source, destination, overwrite)
+            else:
+                transfer(
+                    self.backend,
+                    command,
+                    source,
+                    destination,
+                    overwrite,
+                    console=output_console(self.state),
+                )
         elif command == "forward":
             self.forward(args)
         return None
@@ -687,9 +795,9 @@ class WorkspaceConsole:
             self.close()
             raise ConnectionLost("SSH disconnected; the console was not replayed.")
         if reason == "detach":
-            if self.transfers.active():
+            if self.transfers.active() or self.modules.active():
                 self.message(
-                    "A background transfer is still running. "
+                    "A background transfer or module is still running. "
                     + (
                         "Use Ctrl+Q to park this client, or wait for it to finish."
                         if local_screen.managed()
@@ -727,7 +835,11 @@ class WorkspaceConsole:
                         extra = f" | Transfer {current.number}: {progress_text(current)}"
                     else:
                         extra = f" | Transfer {current.number}: {current.state} (details: transfers)"
-                    return merge_formatted_text([rendered, extra])
+                    rendered = merge_formatted_text([rendered, extra])
+                module = self.modules.status()
+                if module is not None:
+                    extra = f" | Module {module.number}: {module.state} (details: module status)"
+                    rendered = merge_formatted_text([rendered, extra])
                 return rendered
 
             manager.parser._render_toolbar = workspace_toolbar

@@ -31,6 +31,10 @@ from pwncat.workspace.console_ui import (
             'upload "source file" /tmp/destination --o',
             'upload "source file" /tmp/destination --overwrite',
         ),
+        (
+            'download /tmp/source "local file" --b',
+            'download /tmp/source "local file" --background',
+        ),
     ],
 )
 def test_completion_understands_argument_position(line, completed):
@@ -60,6 +64,16 @@ def test_completion_does_not_rewrite_quotes_paths_or_unavailable_commands(line):
         WorkspaceCompleter(COMMANDS).get_completions(
             Document(line), CompleteEvent(completion_requested=True)
         )
+    )
+
+
+def test_download_background_completion_matches_dispatch(monkeypatch):
+    console = WorkspaceConsole(Mock(), ConsoleState())
+    started = Mock()
+    monkeypatch.setattr(console, "start_transfer", started)
+    console.execute("download /remote local --overwrite --background")
+    started.assert_called_once_with(
+        "download", "/remote", console.local_path("local"), True
     )
 
 

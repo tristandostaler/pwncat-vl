@@ -5,21 +5,24 @@ import pwncat
 import pwncat.modules
 from pwncat.util import console
 from pwncat.commands import Complete, Parameter, CommandDefinition, get_module_choices
+from pwncat.workspace import WorkspaceError
 
 
 class Command(CommandDefinition):
     """
     Run a module. If no module is specified, use the module in the
-    current context. You can enter a module context with the `use`
+    current context. You can enter a module context with `module use`
     command.
 
     Module arguments can be appended to the run command with `variable=value`
     syntax. Arguments are type-checked prior to executing, and the results
     are displayed to the terminal.
 
-    To locate available modules, you can use the `search` command. To
+    To locate available modules, you can use `module search`. To
     find documentation on individual modules including expected
-    arguments, you can use the `info` command.
+    arguments, use `module info`. In a workspace console, use
+    `module run --background NAME` for a module that opts in to safe
+    background execution. Check `module status` and `module result` afterward.
     """
 
     PROG = "run"
@@ -29,6 +32,10 @@ class Command(CommandDefinition):
         ),
         "--traceback,-t": Parameter(
             Complete.NONE, action="store_true", help="Show traceback for module errors",
+        ),
+        "--background,-b": Parameter(
+            Complete.NONE, action="store_true",
+            help="Run an opted-in module in the background from a workspace console",
         ),
         "module": Parameter(
             Complete.CHOICES,
@@ -41,6 +48,14 @@ class Command(CommandDefinition):
     }
 
     def run(self, manager: "pwncat.manager.Manager", args):
+
+        owner = getattr(manager, "workspace_console", None)
+        if owner is not None and owner.modules.active() and not args.background:
+            console.log(
+                "[red]error[/red]: a background module is running; "
+                "use 'module status' before starting another module"
+            )
+            return
 
         module_name = args.module
 
@@ -62,6 +77,21 @@ class Command(CommandDefinition):
         # pwncat.config.locals.update(values)
         config_values = manager.config.locals.copy()
         config_values.update(values)
+
+        if args.background:
+            if owner is None:
+                console.log("[red]error[/red]: background modules require a workspace console")
+                return
+            try:
+                owner.start_module(
+                    module_name, config_values, raw=args.raw,
+                    traceback_requested=args.traceback,
+                )
+                if args.module is not None:
+                    manager.config.back()
+            except (WorkspaceError, pwncat.modules.ModuleFailed) as exc:
+                console.log(f"[red]error[/red]: {exc}")
+            return
 
         try:
             result = manager.target.run(module_name, **config_values)
@@ -87,12 +117,16 @@ class Command(CommandDefinition):
                 console.log(f"[red]error[/red]: module failed: {exc}")
             return
 
+        self.display_result(manager, module_name, result, raw=args.raw)
+
+    def display_result(self, manager, module_name, result, *, raw=False, session=None):
+        """Render a foreground or completed background module result."""
         if isinstance(result, list):
-            result = [r for r in result if not r.hidden]
-        elif result is not None and result.hidden:
+            result = [r for r in result if not getattr(r, "hidden", False)]
+        elif result is not None and getattr(result, "hidden", False):
             result = None
 
-        if args.raw:
+        if raw:
             console.print(result)
         else:
 
@@ -102,10 +136,12 @@ class Command(CommandDefinition):
 
             if not isinstance(result, list):
                 result = [result]
-            self.display_item(manager, title=module_name, results=result)
+            self.display_item(manager, title=module_name, results=result, session=session)
 
-    def display_item(self, manager, title, results):
+    def display_item(self, manager, title, results, session=None):
         """Display a possibly complex item"""
+
+        session = manager.target if session is None else session
 
         console.print(f"[bold underline]Module '{title}' Results[/bold underline]")
 
@@ -117,39 +153,45 @@ class Command(CommandDefinition):
         # Organize results by category
         for result in results:
             if isinstance(result, pwncat.modules.Result) and result.is_long_form(
-                manager.target,
+                session,
             ):
                 longform.append(result)
             elif (
                 not isinstance(result, pwncat.modules.Result)
-                or result.category(manager.target) is None
+                or result.category(session) is None
             ):
                 uncategorized.append(result)
-            elif result.category(manager.target) not in categories:
-                categories[result.category(manager.target)] = [result]
+            elif result.category(session) not in categories:
+                categories[result.category(session)] = [result]
             else:
-                categories[result.category(manager.target)].append(result)
+                categories[result.category(session)].append(result)
 
         # Show uncategorized results first
         if uncategorized:
             console.print("[bold]Uncategorized Results[/bold]")
             for result in uncategorized:
-                console.print("- " + result.title(manager.target))
+                console.print(
+                    "- " + (
+                        result.title(session)
+                        if isinstance(result, pwncat.modules.Result)
+                        else str(result)
+                    )
+                )
 
         # Show all other categories
         if categories:
             for category, results in categories.items():
                 console.print(f"[bold]{category}[/bold]")
                 for result in results:
-                    console.print(f"  - {result.title(manager.target)}")
+                    console.print(f"  - {result.title(session)}")
 
         # Show long-form results in their own sections
         if longform:
             for result in longform:
-                if result.category(manager.target) is None:
-                    console.print(f"[bold]{result.title(manager.target)}[/bold]")
+                if result.category(session) is None:
+                    console.print(f"[bold]{result.title(session)}[/bold]")
                 else:
                     console.print(
-                        f"[bold]{result.category(manager.target)} - {result.title(manager.target)}[/bold]",
+                        f"[bold]{result.category(session)} - {result.title(session)}[/bold]",
                     )
-                console.print(textwrap.indent(result.description(manager.target), "  "))
+                console.print(textwrap.indent(result.description(session), "  "))

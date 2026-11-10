@@ -12,7 +12,10 @@ def _transfer_busy(manager, session):
 
     owner = getattr(manager, "workspace_console", None)
     transfers = getattr(owner, "transfers", None)
-    return isinstance(transfers, BackgroundTransfers) and transfers.busy_session(session)
+    modules = getattr(owner, "modules", None)
+    return (
+        isinstance(transfers, BackgroundTransfers) and transfers.busy_session(session)
+    ) or (modules is not None and modules.busy_session(session))
 
 
 class Command(CommandDefinition):
@@ -64,7 +67,7 @@ class Command(CommandDefinition):
                 busy = _transfer_busy(manager, session)
                 user = None if busy else session.current_user()
                 if busy:
-                    user_name = "transfer running"
+                    user_name = "background work running"
                 elif user is None:
                     # A live account may not have a matching user record.
                     # Show its identifier without inventing a username.
@@ -99,8 +102,8 @@ class Command(CommandDefinition):
 
         if _transfer_busy(manager, session):
             console.log(
-                f"[yellow]session-{args.session_id} is busy with a background transfer; "
-                "use 'transfers' to check it[/yellow]"
+                f"[yellow]session-{args.session_id} is busy with background work; "
+                "use 'transfers' or 'module status' to check it[/yellow]"
             )
             return
 

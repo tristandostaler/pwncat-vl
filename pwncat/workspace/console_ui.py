@@ -93,8 +93,8 @@ class WorkspaceCompleter(Completer):
             len(parts) == 2 or (len(parts) == 3 and re.fullmatch(r"%[0-9]+", parts[1]))
         ):
             choices = ["horizontal", "vertical"]
-        elif len(parts) == 4 and parts[0] in ("upload", "download"):
-            choices = ["--overwrite"]
+        elif len(parts) >= 4 and parts[0] in ("upload", "download"):
+            choices = ["--overwrite", "--background", "-b"]
         # Static choices only: completion never runs a remote command or reads
         # a directory, and cannot suggest legacy modules unavailable here.
         yield from WordCompleter(

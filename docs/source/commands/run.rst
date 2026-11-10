@@ -7,6 +7,7 @@ persistence. You can locate modules using the ``search`` command or tab-complete
 with the ``run`` command.
 
 The ``run`` command is similar to the command with the same name in frameworks like Metasploit.
+The grouped spelling is ``module run``; the older ``run`` spelling still works.
 The first argument to ``run`` is the name of the module you would like to execute. This takes
 the form of a Python fully-qualified package name. The default modules are within the ``pwncat/modules``
 directory, but other can be loaded with the ``load`` command.
@@ -18,6 +19,18 @@ the ``run`` command:
 
     # Enumerate setuid files on the remote host
     run enumerate.gather types=file.suid
+
+In a workspace console, opted-in modules can run on a background thread with
+``module run --background NAME``. The console switches to a separate workspace
+SSH session to keep the module's shell free. ``module status`` shows whether it
+is still running, and ``module result`` shows its result or error. Modules
+that require terminal input or change the active session cannot use this mode.
+
+.. code-block:: text
+
+    module run --background enumerate.gather types=file.suid
+    module status
+    module result
 
 
 Required module arguments are first taken from these key-value pairs. If they aren't present,

@@ -19,7 +19,7 @@ index.
 """
 from __future__ import annotations
 
-from pwncat.commands import CommandDefinition, Complete, Parameter
+from pwncat.commands import CommandDefinition, CommandRoute, GroupCommand, Complete, Parameter
 from pwncat.manager import InteractiveExit
 from pwncat.util import console
 from pwncat.workspace import WorkspaceError
@@ -113,11 +113,13 @@ class SplitCommand(_Base):
     }
 
     def run(self, manager, args):
+        if args.pane in ("horizontal", "vertical") and args.direction == "horizontal":
+            args.direction, args.pane = args.pane, None
         target = pane_id(args.pane) if args.pane else self.console.selected().id
         result = self.backend.split(target, args.direction)
         if len(result) != 1:
             raise WorkspaceError(
-                "Split was requested; inspect 'panes' before repeating."
+                "Split was requested; inspect 'workspace pane list' before repeating."
             )
         self.state.selected = pane_id(result[0].decode("ascii", "strict"))
         self.console.message("Created " + self.state.selected, "green")
@@ -140,6 +142,23 @@ class StatusCommand(_Base):
 
     def run(self, manager, args):
         self.console.status()
+
+
+class WorkspaceCommand(GroupCommand):
+    """Inspect the workspace and organize its remote tmux panes and windows."""
+
+    PROG = "workspace"
+    GROUP_SUMMARIES = {
+        ("pane",): "List, select and split remote panes",
+        ("window",): "Create remote windows",
+    }
+    ROUTES = {
+        ("status",): CommandRoute("status", summary="Show workspace status"),
+        ("pane", "list"): CommandRoute("panes", summary="List panes"),
+        ("pane", "select"): CommandRoute("select", summary="Select a pane for resume"),
+        ("pane", "split"): CommandRoute("split", summary="Split a pane"),
+        ("window", "new"): CommandRoute("window", summary="Create a window"),
+    }
 
 class UploadCommand(_Base):
     """Upload to the selected pwncat session; verify the remote bytes."""
@@ -201,15 +220,6 @@ class DownloadCommand(_Base):
             console=output_console(self.state),
         )
 
-class TransfersCommand(_Base):
-    """Show the current or most recent background file transfer."""
-
-    PROG = "transfers"
-    ARGS = {}
-
-    def run(self, manager, args):
-        self.console.transfer_status()
-
 class ColorCommand(_Base):
     """Control console colours (auto / on / off); 'on' overrides NO_COLOR."""
 
@@ -251,6 +261,7 @@ class DetachCommand(_Base):
         raise InteractiveExit
 
 WORKSPACE_COMMANDS = [
+    WorkspaceCommand,
     ForwardCommand,
     PanesCommand,
     SelectCommand,
@@ -259,7 +270,6 @@ WORKSPACE_COMMANDS = [
     StatusCommand,
     UploadCommand,
     DownloadCommand,
-    TransfersCommand,
     ColorCommand,
     ResumeCommand,
     DetachCommand,

@@ -3,6 +3,7 @@ import textwrap
 
 from rich import box
 from rich.table import Table, Column
+from rich.text import Text
 
 import pwncat
 from pwncat.util import console
@@ -11,7 +12,7 @@ from pwncat.commands import Complete, Parameter, CommandDefinition
 
 class Command(CommandDefinition):
     """
-    View info about a module
+    Find modules available to the active session by name pattern.
     """
 
     PROG = "search"
@@ -25,6 +26,13 @@ class Command(CommandDefinition):
     def run(self, manager: "pwncat.manager.Manager", args):
 
         modules = list(manager.target.find_module(f"*{args.module}*"))
+        if not modules:
+            console.print(Text(
+                f"No modules match {args.module!r} for the active session. "
+                "Use 'module list' to see all loaded modules.",
+                style="yellow",
+            ))
+            return
         min_width = max(
             len(module.name.removeprefix("agnostic.")) for module in modules
         )

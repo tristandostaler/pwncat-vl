@@ -18,7 +18,7 @@ class Command(CommandDefinition):
 
     If a platform is provided, a session will automatically be established
     for any new incoming connections. If no platform is provided, the
-    channels will be queued, and can be initialized with the 'listeners'
+    channels will be queued, and can be initialized with 'listener init'
     command.
 
     If the drop_duplicate option is provided, sessions which connect to
@@ -93,7 +93,7 @@ class Command(CommandDefinition):
 
         if args.platform is None:
             manager.print(
-                "You have not specified a platform. Connections will be queued until initialized with the 'listeners' command.",
+                "You have not specified a platform. Connections will be queued until initialized with 'listener init'.",
             )
             if not Confirm.ask("Are you sure?"):
                 return

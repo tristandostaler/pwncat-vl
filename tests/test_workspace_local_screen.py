@@ -33,7 +33,9 @@ def test_detached_client_is_reattached_without_starting_another(monkeypatch):
     monkeypatch.setattr(local_screen.subprocess, "call", call)
     connection = SimpleNamespace(host="server.example", user="user", port=22)
     assert local_screen.attach_or_start(["attach", "lab"], "lab", connection, "lab") == 0
-    call.assert_called_once_with(["/usr/bin/screen", "-r", "123.pwncat-lab"])
+    command = call.call_args.args[0]
+    assert command[:2] == ["/usr/bin/screen", "-c"]
+    assert command[-2:] == ["-r", "123.pwncat-lab"]
 
 
 def test_attached_client_requires_takeover(monkeypatch):
@@ -45,7 +47,9 @@ def test_attached_client_requires_takeover(monkeypatch):
     call = Mock(return_value=0)
     monkeypatch.setattr(local_screen.subprocess, "call", call)
     local_screen.attach_or_start(["attach", "lab"], "lab", connection, "lab", takeover=True)
-    call.assert_called_once_with(["/usr/bin/screen", "-d", "-r", "123.pwncat-lab"])
+    command = call.call_args.args[0]
+    assert command[:2] == ["/usr/bin/screen", "-c"]
+    assert command[-3:] == ["-d", "-r", "123.pwncat-lab"]
 
 
 def test_new_client_runs_inside_screen_with_inner_marker(monkeypatch):
@@ -56,7 +60,8 @@ def test_new_client_runs_inside_screen_with_inner_marker(monkeypatch):
     connection = SimpleNamespace(host="server.example", user="user", port=22)
     local_screen.attach_or_start(["attach", "lab"], "lab", connection, "lab")
     command = call.call_args.args[0]
-    assert command[:3] == ["/usr/bin/screen", "-m", "-S"]
+    assert command[:2] == ["/usr/bin/screen", "-c"]
+    assert command[3:5] == ["-m", "-S"]
     assert command[-3:] == ["workspace", "attach", "lab"]
     assert call.call_args.kwargs["env"][local_screen.INNER] == "1"
 

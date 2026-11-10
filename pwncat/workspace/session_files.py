@@ -152,6 +152,67 @@ def upload(platform, source, destination, *, overwrite=False, progress=None, sta
                     pass
 
 
+def copy_between(
+    source_platform, source, destination_platform, destination,
+    *, overwrite=False, progress=None, status=None,
+):
+    """Stream one regular remote file into a verified stage on another session."""
+    remote_source = _remote_path(source_platform, source)
+    remote_destination = _remote_path(destination_platform, destination)
+    before = _stat(source_platform, remote_source)
+    if before is None or not _regular(source_platform, before):
+        raise WorkspaceError("Source must be a regular remote file (symlinks are refused).")
+    _destination(destination_platform, remote_destination, overwrite)
+
+    stage = remote_destination.parent / (".pwncat-upload-" + uuid.uuid4().hex)
+    temporary = stage / "data"
+    created = False
+    if status:
+        status("copying", before.st_size)
+    try:
+        destination_platform.mkdir(str(stage), mode=0o700)
+        created = True
+        _private_stage(destination_platform, stage)
+        with source_platform.open(str(remote_source), "rb") as reader:
+            with destination_platform.open(str(temporary), "wb") as writer:
+                result = copy_stream(reader, writer, progress)
+                writer.flush()
+        if destination_platform.name != "windows":
+            destination_platform.chmod(str(temporary), 0o600)
+        after = _stat(source_platform, remote_source)
+        if (
+            after is None
+            or (before.st_size, before.st_mtime) != (after.st_size, after.st_mtime)
+            or result.size != before.st_size
+        ):
+            raise WorkspaceError("Source changed during transfer; destination was not published.")
+        if status:
+            status("verifying", result.size)
+        with destination_platform.open(str(temporary), "rb") as reader:
+            if stream_hash(reader) != result.sha256:
+                raise WorkspaceError("Transfer verification failed; destination was not published.")
+        if status:
+            status("publishing", result.size)
+        _destination(destination_platform, remote_destination, overwrite)
+        _publish(destination_platform, temporary, remote_destination, overwrite)
+        return result
+    finally:
+        if created:
+            if destination_platform.name != "windows":
+                try:
+                    destination_platform.chmod(str(stage), 0o700)
+                except (OSError, WorkspaceError):
+                    pass
+            try:
+                destination_platform.unlink(str(temporary))
+            except (FileNotFoundError, OSError):
+                pass
+            try:
+                destination_platform.rmdir(str(stage))
+            except (FileNotFoundError, OSError):
+                pass
+
+
 def download(platform, source, destination, *, overwrite=False, progress=None, status=None):
     """Read from the selected host and publish locally after verification."""
     remote = _remote_path(platform, source)

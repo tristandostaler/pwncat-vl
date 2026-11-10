@@ -42,6 +42,8 @@ class Module(pwncat.modules.BaseModule):
     report to the filesystem.
     """
 
+    BACKGROUND_SAFE = True
+
     ARGUMENTS = {
         "output": pwncat.modules.Argument(
             FileType("w"),

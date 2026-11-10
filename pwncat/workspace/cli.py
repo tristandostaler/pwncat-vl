@@ -467,8 +467,8 @@ def interact(
                             except WorkspaceError as exc:
                                 print("Could not preserve the local terminal: " + safe_text(exc))
                             continue
-                        if workspace_console.transfers.active():
-                            print("A background transfer is still running; wait for it before leaving this client.")
+                        if workspace_console.transfers.active() or workspace_console.modules.active():
+                            print("A background transfer or module is still running; wait for it before leaving this client.")
                             mode = "console"
                             continue
                         return

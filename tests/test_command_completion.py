@@ -62,6 +62,8 @@ def test_first_argument_without_completer_still_offers_flags(
         ("select %", set()),
         ("window title", set()),
         ("resume ", {"--help", "-h"}),
+        ("download /remote /local --b", {"--background"}),
+        ("download /remote /local ", {"--background", "-b", "--overwrite", "--help", "-h"}),
         ("raw ", set()),
         ("unknown ", set()),
     ],

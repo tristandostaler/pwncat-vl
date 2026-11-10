@@ -318,6 +318,9 @@ class BaseModule(metaclass=BaseModuleMeta):
     an array with only a single object to it's scalar value. """
     PLATFORM: list[type["pwncat.platform.Platform"]] = []
     """ The platform this module is compatible with (can be multiple) """
+    BACKGROUND_SAFE: bool = False
+    """Opt in only when a module never reads terminal input or changes the
+    manager's active session. Background runs use a separate shell session."""
 
     def __init__(self):
         self.progress = None

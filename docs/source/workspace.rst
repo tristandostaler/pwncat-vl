@@ -250,6 +250,9 @@ session, ``Ctrl+Q`` parks the live console and ``workspace attach NAME`` returns
 to the same pwncat sessions and selected session. ``resume`` returns to the
 selected remote pane. The explicit ``detach`` command closes the local pwncat
 sessions. Without local ``screen``, ``Ctrl+Q`` closes the local client.
+The local Screen wrapper keeps the terminal's normal scrollback available in
+both the workspace console and remote panes. The mouse wheel scrolls previous
+output while Up/Down still recall commands at the prompt.
 
 Colors default to ``auto``, respecting ``NO_COLOR``, terminal capabilities and
 redirected output. Use ``color on`` to explicitly enable colors, even with
@@ -276,12 +279,12 @@ Example console commands:
 
     help
     color on
-    status
-    panes
-    select %0
-    split horizontal
-    split %0 vertical
-    window "files and logs"
+    workspace status
+    workspace pane list
+    workspace pane select %0
+    workspace pane split vertical
+    workspace pane split %0 vertical
+    workspace window new "files and logs"
     lcd ~/Downloads
     lpwd
     upload "local file.txt" /home/user/remote.txt
@@ -292,11 +295,12 @@ Example console commands:
     resume
     detach
 
-``select %ID`` selects a pane across windows. ``split`` without an ID splits
+``workspace pane select %ID`` selects a pane across windows.
+``workspace pane split`` without an ID splits
 the selected pane; a successful split or new window selects the new pane.
 ``resume`` returns to the selected pane and its window. The prompt displays the
-workspace and selected pane ID; ``panes`` marks it with ``*``. A pane that
-disappears is not silently replaced: choose another using ``select``.
+workspace and selected pane ID; ``workspace pane list`` marks it with ``*``. A pane that
+disappears is not silently replaced: choose another using ``workspace pane select``.
 Entering the console from tmux follows tmux's current pane.
 
 ``resume`` keeps the console's sessions, active session selection,
@@ -311,7 +315,7 @@ that local client without creating another pwncat shell. The explicit
 panes retain their separate lifetime. Set ``PWNCAT_WORKSPACE_SCREEN_DISABLE=1``
 to use the previous process lifetime.
 
-``status`` shows the SSH/file account, history policy, local transfer directory,
+``workspace status`` shows the SSH/file account, history policy, local transfer directory,
 and selected pane's process ID and observed directory. ``lcd`` changes only the
 local directory used for relative upload sources and download destinations.
 It does not change any remote shell's directory. That local setting and console
@@ -320,13 +324,17 @@ history survive automatic reconnection during the same client invocation.
 Inside the pwncat console, ``sessions ID`` selects the active pwncat session.
 ``upload`` writes to that session's host, and ``download`` reads from it. The
 workspace SSH session uses SFTP; other sessions use their platform file
-operations. ``select %ID`` selects a tmux pane and does not change the file
+operations. ``workspace pane select %ID`` selects a tmux pane and does not change the file
 transfer target. If no pwncat session is active, transfers stop with an error.
+The same commands are available as ``transfers upload`` and ``transfers download``.
+Use ``transfers between SOURCE_ID SOURCE_PATH DEST_ID DEST_PATH`` to copy a file
+directly between two sessions. It streams through memory, verifies the staged
+destination, and requires ``--overwrite`` before replacing an existing file.
 
 Add ``--background`` (or ``-b``) to ``upload`` or ``download`` to keep the
 console responsive. Foreground transfers show a progress bar. The console
 toolbar shows byte count, percent and phase for a background transfer; the
-``transfers`` command shows the same progress or its final result. The copy
+``transfers`` or ``transfers status`` shows the same progress or its final result. The copy
 can reach 100% while verification and publication are still in progress.
 Only one background transfer runs at a time. The final result includes the
 verified size and SHA-256 on success. The workspace SSH session uses a separate SFTP channel,
@@ -351,6 +359,10 @@ tmux panes are not treated as pwncat sessions or given the selected pane's
 credentials.
 The console includes normal pwncat commands and modules alongside workspace
 commands. ``resume`` returns to the remote terminal for ordinary shell input.
+``module edit MODULE`` opens the module's local Python file in an editor. Save the
+file, then ``module run MODULE`` to use the new version; ``module reload MODULE`` refreshes
+it before a run. These commands edit files on the local computer, not in a
+remote tmux pane.
 
 An additional display is rejected unless ``attach NAME --takeover`` is used.
 Takeover explicitly detaches existing clients. This is a single-user workflow,
@@ -412,7 +424,7 @@ the workspace console and run:
 
 .. code-block:: text
 
-    listen -m linux -H 127.0.0.1 4444
+    listener start -m linux -H 127.0.0.1 4444
     forward reverse add 4444 4444
     forward reverse list
 
@@ -442,9 +454,9 @@ accepted the listener request, not that the local destination is reachable.
 If an old ``forward add 4444 4444`` still occupies local port 4444, run
 ``forward stop 4444`` before starting the pwncat listener.
 
-Listeners created with ``listen`` inside a workspace console are saved in the
+Listeners created with ``listener start`` inside a workspace console are saved in the
 local workspace profile and restored on attach before reverse forwards. They
-remain active while you move between the console and panes. ``listeners -k ID``
+remain active while you move between the console and panes. ``listener stop ID``
 stops a listener and removes its saved setting. A failed restore leaves the
 setting in place for the next attach. A separate pwncat process does not share
 these live listeners. Incoming sessions are not restored after a restart.

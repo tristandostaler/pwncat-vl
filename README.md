@@ -94,10 +94,22 @@ Changed keys are rejected; noninteractive connections require an already trusted
 to retain history only in the live workspace. `Ctrl+B` controls tmux;
 `Ctrl+G` then `p` opens the workspace console; `Ctrl+G` then `d` detaches.
 `Ctrl+]` remains available as an alternative prefix.
-The console provides `help`, `status`, `panes`, `select`, `split`, `window`,
-`upload`, `download`, `transfers`, `forward`, `color`, `lcd`, `lpwd`, `resume`, and `detach`.
+The console groups module actions under `module`, pane and window actions under
+`workspace`, and pwncat listeners under `listener`. For example,
+`module list`, `module run bootstrap.pwnbox`, `workspace pane list`,
+`workspace pane select %0`, and `listener start -m linux 4444`.
+`help module run` and Tab show the available actions. Existing short command
+names still work in saved scripts and history.
+For a module that supports it, `module run --background bootstrap.pwnbox`
+keeps the console available. Check it with `module status` and `module result`.
+The terminal's scrollback stays available while the workspace console is open,
+so the mouse wheel can scroll earlier output at any time.
 `sessions ID` selects the pwncat session used by `upload` and `download`;
-`select %ID` chooses a tmux pane.
+`workspace pane select %ID` chooses a tmux pane.
+`transfers upload` and `transfers download` group those commands. To stream a
+file between two active sessions without a local intermediate file, use
+`transfers between SOURCE_ID SOURCE_PATH DEST_ID DEST_PATH` (add `--overwrite`
+to replace an existing destination).
 Use `upload --background` or `download --background` to transfer while the
 console stays responsive. Its toolbar shows bytes copied and percent, and
 `transfers` reports progress or the verified result. Foreground transfers show
@@ -244,8 +256,9 @@ For more information on Windows C2 plugins, please see the [documentation].
 The architecture of the pwncat framework uses a generic "module" structure. All functionality is
 implemented as modules. This includes enumeration, persistence and
 privilege escalation. Interacting with modules is similar to most other
-post-exploitation platforms. You can utilize the familiar `run`, `search`
-and `info` commands and enter module contexts with the `use` command.
+post-exploitation platforms. Use `module run`, `module search`, `module info`,
+and `module use` for these actions. `module edit` opens a module in your local
+editor, and the next run loads saved changes. The old short names still work.
 Refer to the documentation for more information.
 
 ### Connecting to a Victim

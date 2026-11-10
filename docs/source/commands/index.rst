@@ -4,6 +4,7 @@ Command index
 .. toctree::
     :caption: Contents
 
+    groups.rst
     alias.rst
     back.rst
     bind.rst

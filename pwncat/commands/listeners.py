@@ -13,7 +13,7 @@ class Command(CommandDefinition):
     """
     Manage active or stopped background listeners. This command
     is only used to interact with established listeners. For
-    creating new listeners, use the "listen" command instead.
+    creating new listeners, use "listener start".
     """
 
     PROG = "listeners"

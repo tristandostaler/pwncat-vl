@@ -109,6 +109,8 @@ class EnumerateModule(BaseModule):
     return new facts that were not cached in the database already.
     """
 
+    BACKGROUND_SAFE = True
+
     # List of categories/enumeration types this module provides
     # This should be set by the sub-classes to know where to find
     # different types of enumeration data

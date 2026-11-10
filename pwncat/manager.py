@@ -39,6 +39,9 @@ import tempfile
 import threading
 import contextlib
 import importlib.util
+import hashlib
+import inspect
+from pathlib import Path
 from io import TextIOWrapper
 from enum import Enum, auto
 from collections.abc import Callable, Generator
@@ -504,6 +507,7 @@ class Session:
         self.id = manager.session_id
         self.manager = manager
         self.background = None
+        self._background_config = threading.local()
         self._db_session = None
         self.db = manager.db.open()
         self.module_depth = 0
@@ -570,7 +574,8 @@ class Session:
         """Get the configuration object for this manager. This
         is simply a wrapper for session.manager.config to make
         accessing configuration a little easier."""
-        return self.manager.config
+        slot = getattr(self, "_background_config", None)
+        return getattr(slot, "value", self.manager.config)
 
     @property
     def target(self) -> Target:
@@ -661,6 +666,9 @@ class Session:
             module = self.manager.modules.get("agnostic." + module_name)
         if module is None:
             raise pwncat.modules.ModuleNotFound(module_name)
+
+        self.manager.reload_if_edited(module.name)
+        module = self.manager.modules[module.name]
 
         if module.PLATFORM is not None and type(self.platform) not in module.PLATFORM:
             raise pwncat.modules.IncorrectPlatformError(module_name)
@@ -825,6 +833,7 @@ class Manager:
         self.session_id = 0  # start with 0-indexed session IDs
         self.sessions: dict[int, Session] = {}
         self.modules: dict[str, pwncat.modules.BaseModule] = {}
+        self._edited_module_hashes: dict[str, str] = {}
         self._target = None
         self.parser = CommandParser(self)
         self.interactive_running = False
@@ -991,6 +1000,85 @@ class Manager:
             short_name = module_name.split("pwncat.modules.", 1)[1]
             self.modules[short_name] = module.Module()
             self.modules[short_name].name = short_name
+
+    def module_source(self, name: str) -> Path:
+        """Return the local Python file backing a loaded module."""
+        module = self.modules.get(name)
+        if module is None:
+            raise pwncat.modules.ModuleNotFound(name)
+        source = inspect.getsourcefile(type(module))
+        if source is None or not Path(source).is_file():
+            raise pwncat.modules.ModuleFailed(f"{name}: no editable Python source")
+        return Path(source).resolve()
+
+    def watch_module(self, name: str):
+        """Reload a module on its next run if its source is saved again."""
+        source = self.module_source(name)
+        self._edited_module_hashes[name] = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    def reload_if_edited(self, name: str):
+        previous = self._edited_module_hashes.get(name)
+        if previous is None:
+            return
+        source = self.module_source(name)
+        try:
+            current = hashlib.sha256(source.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise pwncat.modules.ModuleFailed(f"{name}: cannot read edited source: {exc}") from exc
+        if current != previous:
+            self.reload_module(name)
+
+    def reload_module(self, name: str):
+        """Replace one loaded module after its new source compiles successfully.
+
+        On a syntax or import error, leave the old instance and imported module
+        available, but fail the requested run instead of executing stale code.
+        """
+        source = self.module_source(name)
+        old_instance = self.modules[name]
+        module_name = type(old_instance).__module__
+        old_import = sys.modules.get(module_name)
+        try:
+            content = source.read_bytes()
+            code = compile(content, str(source), "exec")
+            package_paths = (
+                list(old_import.__path__)
+                if old_import is not None and hasattr(old_import, "__path__")
+                else None
+            )
+            spec = importlib.util.spec_from_file_location(
+                module_name, source, submodule_search_locations=package_paths,
+            )
+            if spec is None:
+                raise ValueError("cannot load this module's source")
+            candidate = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = candidate
+            exec(code, candidate.__dict__)
+            cls = candidate.__dict__.get("Module")
+            if (
+                not inspect.isclass(cls)
+                or not issubclass(cls, pwncat.modules.BaseModule)
+                or cls.__module__ != module_name
+            ):
+                raise ValueError("source must define a Module subclass")
+            instance = cls()
+            instance.name = name
+        except Exception as exc:
+            if old_import is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = old_import
+            raise pwncat.modules.ModuleFailed(f"{name}: reload failed: {exc}") from exc
+
+        self.modules[name] = instance
+        if self.config.module is old_instance:
+            self.config.module = instance
+            self.config.locals = {
+                key: value for key, value in self.config.locals.items()
+                if key in instance.ARGUMENTS
+            }
+        self._edited_module_hashes[name] = hashlib.sha256(content).hexdigest()
+        return instance
 
     def log(self, *args, **kwargs):
         """Output a log entry"""

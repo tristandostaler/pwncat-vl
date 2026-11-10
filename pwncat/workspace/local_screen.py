@@ -8,12 +8,34 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 
 from . import WorkspaceError
 
 
 INNER = "PWNCAT_WORKSPACE_SCREEN_INNER"
 DISABLE = "PWNCAT_WORKSPACE_SCREEN_DISABLE"
+
+
+@contextmanager
+def _scrollback_screenrc():
+    """Keep the outer terminal's scrollback active inside local Screen."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", prefix="pwncat-screen-", suffix=".screenrc"
+    ) as config:
+        user_config = Path.home() / ".screenrc"
+        if user_config.is_file():
+            quoted = str(user_config).replace("\\", "\\\\").replace('"', '\\"')
+            config.write(f'source "{quoted}"\n')
+        # Screen otherwise switches the outer terminal to its alternate
+        # buffer. Many terminals then turn wheel movement into Up/Down keys,
+        # which prompt_toolkit interprets as command history navigation.
+        config.write("termcapinfo * ti@:te@\n")
+        config.write("defscrollback 50000\n")
+        config.flush()
+        yield config.name
 
 
 def managed():
@@ -62,14 +84,17 @@ def attach_or_start(argv, alias, connection, remote_name, *, takeover=False, new
             raise WorkspaceError("A local client already owns this workspace. Attach to it before creating another.")
         if state == "Attached" and not takeover:
             raise WorkspaceError("This workspace client is attached in another terminal. Use --takeover to move it here.")
-        command = [screen, "-d", "-r", ident] if state == "Attached" else [screen, "-r", ident]
-        return subprocess.call(command)
+        with _scrollback_screenrc() as config:
+            command = [screen, "-c", config]
+            command += ["-d", "-r", ident] if state == "Attached" else ["-r", ident]
+            return subprocess.call(command)
     env = {**os.environ, INNER: "1"}
-    command = [
-        screen, "-m", "-S", name,
-        sys.executable, "-m", "pwncat", "workspace", *argv,
-    ]
-    return subprocess.call(command, env=env)
+    with _scrollback_screenrc() as config:
+        command = [
+            screen, "-c", config, "-m", "-S", name,
+            sys.executable, "-m", "pwncat", "workspace", *argv,
+        ]
+        return subprocess.call(command, env=env)
 
 
 def park():
