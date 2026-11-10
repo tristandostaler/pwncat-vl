@@ -61,8 +61,19 @@ Connection options may be placed before or after the action:
     pwncat-vl workspace user@host -p 2222 -i ~/.ssh/id_ed25519 attach lab
 
 ``new`` creates a workspace only when its directory does not exist.
-``--no-attach`` creates it without entering terminal mode. ``attach`` always
-requires the original live server; it never recreates missing shells.
+``--no-attach`` creates it without entering terminal mode. ``attach`` and
+``console`` reuse a running workspace. For a saved local shortcut, if a server
+reset removed its remote directory, they create a fresh workspace and update
+the saved identity. If its metadata survives but tmux has stopped, they first
+verify that the recorded server and process have stopped, archive the surviving
+files, then create a fresh workspace with the previous history policy.
+Processes and shell variables lost during a reset cannot be restored.
+
+Recovery does not replace a running workspace with a different identity, or
+overwrite corrupt/incomplete metadata. Permission errors and uncertain server
+state stop recovery. SSH authentication and host key verification still apply.
+Other commands, and reconnect attempts within an already open client, continue
+to require the original live workspace.
 
 The workspace uses a separate tmux server and configuration at
 ``~/.pwncat-workspaces/NAME/``. Ordinary SSH/tmux can attach independently:
@@ -132,33 +143,39 @@ Writes are locked and atomic; symlinks/reparse points, invalid profiles, and uns
 POSIX ownership/permissions are rejected. These files contain connection metadata and key paths,
 so keep them private even though they contain no authentication secrets.
 
-Changing a saved hostname
-------------------------
+Changing saved connection settings
+---------------------------------
 
-If the same server has a new hostname or IP address, edit its local shortcut:
+Edit the host, SSH username, or saved password of a local shortcut:
 
 .. code-block:: sh
 
     pwncat-vl workspace edit lab --host new-host.example
+    pwncat-vl workspace edit lab --username newuser
+    pwncat-vl workspace edit lab --password
+    pwncat-vl workspace edit lab --host new-host.example --username newuser --password
     pwncat-vl workspace attach lab
 
-``edit`` works offline on macOS, Linux/WSL and Windows. Supply a hostname, IPv4
-address, or IPv6 address (optionally bracketed), without a username or port.
-The saved username, port, key path, known-hosts path, remote workspace identity
-and console history are retained. An already connected client keeps its current
-connection; detach and attach again to use the new hostname.
+``edit`` works offline on macOS, Linux/WSL and Windows. For ``--host``, supply a
+hostname, IPv4 address, or IPv6 address (optionally bracketed), without a username
+or port. ``--username`` (also ``--user``) takes a literal SSH account name,
+including domain-qualified names. The options can be used separately or together.
+Unspecified settings, the port, key path, known-hosts path, saved forwards,
+remote workspace identity, and local console history are retained.
 
-Changing the hostname removes saved passwords and key passphrases from the OS
-vault. Prompt preferences remain, so enter them again on the next connection;
-add ``--save-credentials`` to save them for the new hostname. Editing to the same
-hostname changes nothing and keeps saved credentials. If the vault cannot remove
-the old credentials, the edit stops and the hostname remains unchanged. If the
-subsequent profile write fails, credentials may already be removed; the error
-explains this and the edit can be retried.
+Changing the host or username keeps saved passwords and key passphrases by
+moving them to the credential-store entry for the updated connection. Editing
+to the same host and username does not access the vault. ``--password`` prompts
+privately for the new password and confirmation, then saves it in the OS vault;
+it preserves any saved key passphrase. No password is accepted as an argument
+or written to the profile file. This updates the locally saved login password,
+not the account password on the server, and does not test authentication.
 
-Host key verification still applies on the next connection. This command does
-not create or adopt a workspace on a different server: attachment still requires
-the saved workspace UUID, tmux server epoch and socket path to match.
+Cancelling the prompt or entering mismatched passwords leaves the profile and
+credentials unchanged. If publication fails, the previous credentials are
+restored; if the vault also prevents rollback, the error reports the incomplete
+recovery. An already connected client keeps its current connection; detach and
+attach again to use the edited settings. Host key verification still applies.
 
 Saving passwords and key passphrases
 -----------------------------------
@@ -186,7 +203,9 @@ Service. A headless system without a usable vault reports an error. No plaintext
 or third-party file backend is selected as a fallback. The OS can still request
 vault unlock or access approval.
 
-Secrets are saved only after successful authentication and workspace validation.
+Connection commands save secrets only after successful authentication and
+workspace validation. The explicit offline ``edit --password`` command saves
+the replacement without connecting or validating it against the server.
 The profile stores an opaque reference bound to the local name, connection,
 configuration location and selected key path. Vault contents are never placed in
 shell arguments, environment variables, profile JSON, or application logs.
@@ -197,6 +216,7 @@ To replace a saved password or remove saved secrets:
 .. code-block:: sh
 
     pwncat-vl workspace attach lab --password --save-credentials
+    pwncat-vl workspace edit lab --password
     pwncat-vl workspace forget-credentials lab
 
 ``--password`` explicitly asks for a new password, overriding the saved value
@@ -225,8 +245,11 @@ The console uses pwncat's yellow ``(local)`` and magenta name, a visible workspa
 label, syntax highlighting, a status bar, and colored help/status/pane tables.
 Tab completes commands and supported arguments, including ``help``, ``split``,
 ``forward`` and ``color`` choices. Up/Down recall commands, ``Ctrl+R`` searches
-history, and history suggestions appear while typing. ``Ctrl+Q`` discards pending
-input and resumes the selected remote pane; ``Ctrl+D`` at an empty prompt detaches.
+history, and history suggestions appear while typing. With a local ``screen``
+session, ``Ctrl+Q`` parks the live console and ``workspace attach NAME`` returns
+to the same pwncat sessions and selected session. ``resume`` returns to the
+selected remote pane. The explicit ``detach`` command closes the local pwncat
+sessions. Without local ``screen``, ``Ctrl+Q`` closes the local client.
 
 Colors default to ``auto``, respecting ``NO_COLOR``, terminal capabilities and
 redirected output. Use ``color on`` to explicitly enable colors, even with
@@ -276,26 +299,58 @@ workspace and selected pane ID; ``panes`` marks it with ``*``. A pane that
 disappears is not silently replaced: choose another using ``select``.
 Entering the console from tmux follows tmux's current pane.
 
+``resume`` keeps the console's sessions, active session selection,
+and aliases in memory while you use tmux. Press ``Ctrl+G`` then ``p`` to return
+to that same console. On macOS or other systems with local ``screen``, the
+interactive ``new``, ``attach`` and ``console`` actions run inside a private
+local screen session. ``Ctrl+Q`` in the console or ``Ctrl+G`` then ``d`` in the
+pane detaches the terminal while the client, SSH connection, listeners and
+pwncat sessions keep running. A later ``workspace attach NAME`` reconnects to
+that local client without creating another pwncat shell. The explicit
+``detach`` command or SSH loss closes local console sessions. The remote tmux
+panes retain their separate lifetime. Set ``PWNCAT_WORKSPACE_SCREEN_DISABLE=1``
+to use the previous process lifetime.
+
 ``status`` shows the SSH/file account, history policy, local transfer directory,
 and selected pane's process ID and observed directory. ``lcd`` changes only the
 local directory used for relative upload sources and download destinations.
 It does not change any remote shell's directory. That local setting and console
 history survive automatic reconnection during the same client invocation.
 
+Inside the pwncat console, ``sessions ID`` selects the active pwncat session.
+``upload`` writes to that session's host, and ``download`` reads from it. The
+workspace SSH session uses SFTP; other sessions use their platform file
+operations. ``select %ID`` selects a tmux pane and does not change the file
+transfer target. If no pwncat session is active, transfers stop with an error.
+
+Add ``--background`` (or ``-b``) to ``upload`` or ``download`` to keep the
+console responsive. Foreground transfers show a progress bar. The console
+toolbar shows byte count, percent and phase for a background transfer; the
+``transfers`` command shows the same progress or its final result. The copy
+can reach 100% while verification and publication are still in progress.
+Only one background transfer runs at a time. The final result includes the
+verified size and SHA-256 on success. The workspace SSH session uses a separate SFTP channel,
+so its shell remains usable. For another pwncat session, the transfer uses that
+session's command channel; the console switches to the workspace session while
+it runs. The transferring session cannot be selected or closed until the
+transfer finishes. ``resume`` can still be used while it runs, and Ctrl+Q
+parks a screen-managed client. Closing the client is refused until the
+transfer finishes.
+
 New panes start in the workspace account's home directory. Pane processes retain
 their own directories, environments and jobs. Reported directories are metadata;
 they are not used to guess the identity or filesystem inside a nested SSH,
-container or user-switching shell. File operations require absolute remote paths
-and always use the original workspace SSH account.
+container or user-switching shell. Workspace SSH file operations require
+absolute remote paths. A selected pwncat session can use a path relative to
+its own working directory.
 
 The local console temporarily replaces the display, while the remote panes keep
 running. The display, tmux control protocol and SFTP each have their own SSH
-channel. Existing pwncat upload/download/enumeration remain available through
-ordinary pwncat sessions in a separate terminal. They are not routed into tmux
-panes, automatically retried, or given the selected pane's credentials.
-This workspace console has its own explicit command set; it does not expose the
-legacy module runner. Unsupported commands produce an error and are never sent
-to a shell. ``resume`` returns to the remote terminal for ordinary shell input.
+channel. Transfers into another pwncat session use that session's file access;
+tmux panes are not treated as pwncat sessions or given the selected pane's
+credentials.
+The console includes normal pwncat commands and modules alongside workspace
+commands. ``resume`` returns to the remote terminal for ordinary shell input.
 
 An additional display is rejected unless ``attach NAME --takeover`` is used.
 Takeover explicitly detaches existing clients. This is a single-user workflow,
@@ -330,16 +385,17 @@ lookup is performed. Omit ``SERVER_IP`` to retain the original ``127.0.0.1``
 destination. ``forward list`` shows each selected destination address and port.
 
 The local listener always binds to IPv4 loopback. The SSH host is the original
-workspace host, regardless of any nested connection in a pane. This command does
-not provide SOCKS, reverse forwarding or public listeners.
+workspace host, regardless of any nested connection in a pane. Local forwarding
+does not provide SOCKS or public listeners.
 
 The forward remains active while you use your panes or the workspace console.
-Return to the console to run ``forward list`` or ``forward stop 8080``. A stop
+Return to the console to run ``forward`` (or ``forward list``) for one view of
+local and reverse forwards, or ``forward stop 8080``. A stop
 also closes that forward's active clients. Forwards belong to the current local
-client process; they close on detach, exit or SSH loss and are not restored
-automatically after reconnect. They are not saved in workspace profiles or
-remote tmux state. A separate ``workspace console`` process manages only the
-forwards it started.
+client process; they close on detach, exit or SSH loss. Their settings are
+saved in the local workspace profile and restored on attach or reconnect.
+``forward stop`` removes the saved setting. A separate ``workspace console``
+process manages only the live forwards it started.
 
 The service is contacted when a local application connects to the listening port.
 A successful ``forward add`` confirms that the local listener is ready; it does
@@ -347,6 +403,51 @@ not prove the remote service is reachable. The SSH server must permit local TCP
 forwarding. ``forward list`` includes the active connection count and last error.
 At most eight forwards and sixteen clients per forward are allowed. Relay buffers
 are bounded, traffic is not logged, and interrupted connections are never replayed.
+
+Reverse forwarding
+------------------
+
+To expose a local pwncat listener through the existing SSH connection, open
+the workspace console and run:
+
+.. code-block:: text
+
+    listen -m linux -H 127.0.0.1 4444
+    forward reverse add 4444 4444
+    forward reverse list
+
+This requests a listener on the SSH host's ``127.0.0.1:4444``. A connection to
+that remote port is relayed to your computer's ``127.0.0.1:4444``. For another
+host to reach the SSH host's listener, explicitly request an external bind:
+
+.. code-block:: text
+
+    forward reverse add 4444 4444 0.0.0.0
+
+The SSH server must allow remote TCP forwarding and external binds
+(``GatewayPorts`` in OpenSSH). It may refuse the request or restrict the actual
+bind address; the SSH protocol does not report the effective address. Use
+``forward reverse stop 4444`` to close the remote listener and its active
+connections. No program or separate listener is needed on the SSH host.
+
+Reverse forwards are limited to one per SSH connection and sixteen clients per
+forward. They use bounded relay buffers and do not log traffic. Their settings
+are saved with the local workspace profile and restored on attach or reconnect.
+The live connection ends on detach, SSH loss or process exit. If restoration
+fails, the saved setting remains and ``forward reverse list`` shows the error.
+``forward reverse stop`` removes both the live forward and its saved setting.
+The destination on your computer is always IPv4 loopback; start the local
+listener first. A successful ``forward reverse add`` confirms the SSH server
+accepted the listener request, not that the local destination is reachable.
+If an old ``forward add 4444 4444`` still occupies local port 4444, run
+``forward stop 4444`` before starting the pwncat listener.
+
+Listeners created with ``listen`` inside a workspace console are saved in the
+local workspace profile and restored on attach before reverse forwards. They
+remain active while you move between the console and panes. ``listeners -k ID``
+stops a listener and removes its saved setting. A failed restore leaves the
+setting in place for the next attach. A separate pwncat process does not share
+these live listeners. Incoming sessions are not restored after a restart.
 
 History and privacy
 -------------------

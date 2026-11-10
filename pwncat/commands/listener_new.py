@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import os
+
 from rich.prompt import Confirm
 
 import pwncat
@@ -96,6 +98,8 @@ class Command(CommandDefinition):
             if not Confirm.ask("Are you sure?"):
                 return
 
+        ssl_cert = os.path.abspath(os.path.expanduser(args.ssl_cert)) if args.ssl_cert else None
+        ssl_key = os.path.abspath(os.path.expanduser(args.ssl_key)) if args.ssl_key else None
         with console.status("creating listener..."):
             listener = manager.create_listener(
                 protocol="socket",
@@ -103,8 +107,8 @@ class Command(CommandDefinition):
                 host=args.host,
                 port=args.port,
                 ssl=args.ssl,
-                ssl_cert=args.ssl_cert,
-                ssl_key=args.ssl_key,
+                ssl_cert=ssl_cert,
+                ssl_key=ssl_key,
                 established=established,
                 count=args.count,
             )
@@ -117,4 +121,21 @@ class Command(CommandDefinition):
                 f"[red]error[/red]: listener startup failed: {listener.failure_exception}",
             )
         else:
+            settings = getattr(getattr(manager, "workspace_state", None), "listener_settings", None)
+            if settings is not None:
+                from pwncat.workspace.model import ListenerRule
+                from pwncat.workspace import WorkspaceError
+                from pwncat.workspace.model import safe_text
+
+                try:
+                    settings.remember(ListenerRule(
+                        args.host, args.port, args.platform, args.count,
+                        args.ssl, ssl_cert, ssl_key, args.drop_duplicate,
+                    ))
+                except (WorkspaceError, OSError) as exc:
+                    listener.stop()
+                    raise WorkspaceError(
+                        "Could not save the listener; it was stopped: " + safe_text(exc)
+                    ) from exc
+                manager.log("listener saved for restoration when this workspace is attached")
             manager.log(f"new listener created for {listener}")

@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 from . import IdentityMismatch, WorkspaceError
 from .credentials import CredentialStore, Secrets
-from .model import ForwardRule, WorkspaceRef, workspace_name
+from .model import ForwardRule, ListenerRule, ReverseForwardRule, WorkspaceRef, workspace_name
 from .ssh import SSHProfile
 
 
@@ -71,6 +71,8 @@ class SavedWorkspace:
     credential_ref: str | None = None
     forwards: tuple[ForwardRule, ...] = ()
     history_binding: str | None = None
+    reverse_forwards: tuple[ReverseForwardRule, ...] = ()
+    listeners: tuple[ListenerRule, ...] = ()
 
     @property
     def console_history_binding(self):
@@ -117,6 +119,8 @@ class SavedWorkspace:
             "workspace": asdict(self.ref),
             "credential_ref": self.credential_ref,
             "forwards": [asdict(rule) for rule in self.forwards],
+            "reverse_forwards": [asdict(rule) for rule in self.reverse_forwards],
+            "listeners": [asdict(rule) for rule in self.listeners],
             "history_binding": self.history_binding,
         }
 
@@ -184,6 +188,16 @@ class SavedWorkspace:
             forwards = tuple(ForwardRule(**rule) for rule in raw_forwards)
             if len({rule.local_port for rule in forwards}) != len(forwards):
                 raise ValueError
+            raw_reverse = value.get("reverse_forwards", [])
+            if not isinstance(raw_reverse, list) or len(raw_reverse) > 1:
+                raise ValueError
+            reverse_forwards = tuple(ReverseForwardRule(**rule) for rule in raw_reverse)
+            raw_listeners = value.get("listeners", [])
+            if not isinstance(raw_listeners, list) or len(raw_listeners) > 8:
+                raise ValueError
+            listeners = tuple(ListenerRule(**rule) for rule in raw_listeners)
+            if len({(rule.host, rule.port) for rule in listeners}) != len(listeners):
+                raise ValueError
             return cls(
                 alias,
                 connection,
@@ -193,6 +207,8 @@ class SavedWorkspace:
                 credential_ref,
                 forwards,
                 history_binding,
+                reverse_forwards,
+                listeners,
             )
         except (KeyError, ValueError, TypeError, AttributeError, WorkspaceError) as exc:
             raise WorkspaceError(
@@ -304,6 +320,8 @@ class ProfileStore:
                 saved = replace(
                     saved,
                     forwards=existing.forwards if existing.ref == saved.ref else (),
+                    reverse_forwards=existing.reverse_forwards if existing.ref == saved.ref else (),
+                    listeners=existing.listeners if existing.ref == saved.ref else (),
                     history_binding=(
                         existing.history_binding if existing.ref == saved.ref else None
                     ),
@@ -448,6 +466,50 @@ class ProfileStore:
             if rules == saved.forwards:
                 return False
             self._write(replace(saved, forwards=rules))
+            return True
+
+    def reverse_rules(self, alias, connection, ref):
+        return self.check_workspace(alias, connection, ref).reverse_forwards
+
+    def remember_reverse(self, alias, connection, ref, rule):
+        with self._lock():
+            saved = self.check_workspace(alias, connection, ref)
+            if saved.reverse_forwards and saved.reverse_forwards[0].remote_port != rule.remote_port:
+                raise WorkspaceError("Only one reverse forward can be saved per workspace.")
+            self._write(replace(saved, reverse_forwards=(rule,)))
+
+    def forget_reverse(self, alias, connection, ref, remote_port):
+        with self._lock():
+            if self.get(alias) is None:
+                return False
+            saved = self.check_workspace(alias, connection, ref)
+            rules = tuple(rule for rule in saved.reverse_forwards if rule.remote_port != remote_port)
+            if rules == saved.reverse_forwards:
+                return False
+            self._write(replace(saved, reverse_forwards=rules))
+            return True
+
+    def listener_rules(self, alias, connection, ref):
+        return self.check_workspace(alias, connection, ref).listeners
+
+    def remember_listener(self, alias, connection, ref, rule):
+        with self._lock():
+            saved = self.check_workspace(alias, connection, ref)
+            rules = {(item.host, item.port): item for item in saved.listeners}
+            rules[rule.host, rule.port] = rule
+            if len(rules) > 8:
+                raise WorkspaceError("At most eight listeners can be saved per workspace.")
+            self._write(replace(saved, listeners=tuple(rules[key] for key in sorted(rules))))
+
+    def forget_listener(self, alias, connection, ref, host, port):
+        with self._lock():
+            if self.get(alias) is None:
+                return False
+            saved = self.check_workspace(alias, connection, ref)
+            rules = tuple(rule for rule in saved.listeners if (rule.host, rule.port) != (host, port))
+            if rules == saved.listeners:
+                return False
+            self._write(replace(saved, listeners=rules))
             return True
 
     def forget(self, alias):

@@ -33,6 +33,7 @@ def host(monkeypatch):
         pytest.skip("Real tmux required; set PWNCAT_TEST_TMUX")
     home = Path(tempfile.mkdtemp(prefix="pww-", dir="/tmp"))
     monkeypatch.setenv("PWNCAT_WORKSPACE_CONFIG", str(home / "local-profiles"))
+    monkeypatch.setenv("PWNCAT_WORKSPACE_SCREEN_DISABLE", "1")
     server = LoopbackSSH(home, tmux)
     profile = SSHProfile(
         "127.0.0.1", "test", server.port, server.identity, server.known_hosts
@@ -322,6 +323,63 @@ def test_cli_create_list_split_and_destroy(host, capsys):
     assert (directory / "manifest.json").read_bytes() != manifest
 
 
+@pytest.mark.parametrize("reset", ["missing", "stopped"])
+def test_saved_attachment_recovers_after_remote_reset(host, monkeypatch, reset):
+    from unittest.mock import Mock
+
+    from pwncat.workspace.cli import main
+    from pwncat.workspace.profiles import ProfileStore
+
+    home, server, profile = host
+    assert (
+        main(
+            [
+                f"test@127.0.0.1:{server.port}",
+                "-i",
+                profile.identity,
+                "--known-hosts",
+                profile.known_hosts,
+                "new",
+                "reset",
+                "--no-attach",
+                "--history",
+                "private",
+            ]
+        )
+        == 0
+    )
+    original = ProfileStore().get("reset")
+    assert main(["destroy", "reset", "--yes"]) == 0
+    directory = home / ".pwncat-workspaces/reset"
+    if reset == "missing":
+        shutil.rmtree(directory)
+    else:
+        (directory / "history/retained.history").write_text("history before reset\n")
+
+    interact = Mock()
+    monkeypatch.setattr("pwncat.workspace.cli.interact", interact)
+    assert main(["attach", "reset"]) == 0
+    interact.assert_called_once()
+    recovered = ProfileStore().get("reset")
+    assert recovered.connection == original.connection
+    assert recovered.ref.uuid != original.ref.uuid
+    connection = SSHConnection(profile).connect()
+    backend = TmuxWorkspace(connection)
+    try:
+        assert backend.load("reset", expected=recovered.ref) == recovered.ref
+        assert not backend.panes()[0].dead
+        if reset == "stopped":
+            archived = list((home / ".pwncat-workspaces/.archives").iterdir())
+            assert len(archived) == 1
+            assert (
+                archived[0] / "history/retained.history"
+            ).read_text() == "history before reset\n"
+            assert backend.store.load("reset")["history"] == "private"
+    finally:
+        backend.close()
+        connection.close()
+
+
 def test_console_selection_windows_and_transfers(host, tmp_path, capsys):
     from pwncat.workspace.console import WorkspaceConsole
 
@@ -501,7 +559,9 @@ def test_interactive_cli_roundtrip_between_console_and_tmux(host, entry):
         os.write(master, b"\r")
         expect(b"Show workspace commands and usage.")
         expect(b"[workspace:keyboard:%0]")
-        os.write(master, b"split horizontal\x11")  # Ctrl+Q discards unfinished input.
+        os.write(master, b"split horizontal\x03")  # Ctrl+C discards unfinished input.
+        expect(b"[workspace:keyboard:%0]")
+        os.write(master, b"resume\r")
         expect(b"\x1b[?1049h")  # Native tmux takes the terminal.
         os.write(master, b"\x07p")
         expect(b"[workspace:keyboard:%0]")
@@ -523,7 +583,7 @@ def test_interactive_cli_roundtrip_between_console_and_tmux(host, entry):
         history = ConsoleHistory(store, "keyboard", saved.connection, saved.ref).load()
         assert "help" in history and "split vertical" in history
         assert history[-1] == "detach"
-        assert "split horizontal" not in history  # Ctrl+Q discarded pending input.
+        assert "split horizontal" not in history  # Ctrl+C discarded pending input.
         if entry == "console":
             # A genuinely new CLI process must expose persisted commands to Up.
             os.close(master)

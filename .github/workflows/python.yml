@@ -53,7 +53,7 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install . pytest pycryptodome
       - name: Test SSH workspace with real tmux
-        run: python -m pytest tests/test_workspace.py tests/test_workspace_integration.py
+        run: python -m pytest tests/test_workspace.py tests/test_workspace_integration.py tests/test_workspace_recovery.py
 
   workspace-credentials:
     strategy:

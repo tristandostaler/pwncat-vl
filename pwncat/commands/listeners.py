@@ -160,6 +160,9 @@ class Command(CommandDefinition):
 
         if args.kill:
             # Kill the specified listener
+            settings = getattr(getattr(manager, "workspace_state", None), "listener_settings", None)
+            if settings is not None:
+                settings.stop(manager.listeners[args.id])
             with console.status("stopping listener..."):
                 manager.listeners[args.id].stop()
             manager.log(f"stopped listener on {manager.listeners[args.id]!s}")

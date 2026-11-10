@@ -249,8 +249,26 @@ class TmuxWorkspace:
         )
         result = []
         for row in rows:
-            fields = shlex.split(row.decode("utf-8", "replace"))
+            # Keep the final field even when tmux cannot report a pane's cwd.
+            # shlex.split on the whole row drops that empty field.
+            fields = row.decode("utf-8", "replace").split(" ", 7)
+            if len(fields) == 7:
+                fields.append("")
             if len(fields) != 8 or not re.fullmatch(r"@[0-9]+", fields[0]):
+                raise WorkspaceError(
+                    "Unexpected pane metadata; no pane action was performed."
+                )
+            try:
+                directory = shlex.split(fields[7]) if fields[7] else [""]
+            except ValueError:
+                directory = []
+            if (
+                len(directory) != 1
+                or not re.fullmatch(r"%[0-9]+", fields[1])
+                or any(not value.isascii() or not value.isdigit() for value in fields[2:5])
+                or fields[5] not in ("0", "1")
+                or fields[6] not in ("0", "1")
+            ):
                 raise WorkspaceError(
                     "Unexpected pane metadata; no pane action was performed."
                 )
@@ -260,7 +278,7 @@ class TmuxWorkspace:
                     *map(int, fields[2:5]),
                     fields[5] == "1",
                     fields[6] == "1",
-                    fields[7],
+                    directory[0],
                     fields[0],
                 )
             )

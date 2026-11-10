@@ -1,5 +1,6 @@
-"""Local-only forwarding over disposable SSH, including lifecycle and half-closes."""
+"""Workspace forwarding over disposable SSH, including lifecycle and half-closes."""
 
+import io
 import socket
 import socketserver
 import threading
@@ -14,6 +15,7 @@ from pwncat.workspace.console import ConsoleState, WorkspaceConsole
 from pwncat.workspace.forwarding import (
     ForwardStatus,
     LocalForwards,
+    ReverseForwards,
     destination_address,
     port_number,
 )
@@ -56,6 +58,8 @@ class Policy(paramiko.ServerInterface):
     def __init__(self, server):
         self.server = server
         self.destinations = {}
+        self.transport = None
+        self.remote_listeners = {}
 
     def check_auth_publickey(self, username, key):
         return (
@@ -81,12 +85,38 @@ class Policy(paramiko.ServerInterface):
         self.destinations[chanid] = destination
         return paramiko.OPEN_SUCCEEDED
 
+    def check_port_forward_request(self, address, port):
+        if self.server.deny_remote:
+            return False
+        listener = socket.socket()
+        try:
+            listener.bind((address, port))
+            listener.listen(5)
+            listener.settimeout(0.1)
+        except OSError:
+            listener.close()
+            return False
+        self.remote_listeners[(address, port)] = listener
+        threading.Thread(
+            target=self.server.accept_reverse,
+            args=(self.transport, listener, address, port),
+            daemon=True,
+        ).start()
+        return port
+
+    def cancel_port_forward_request(self, address, port):
+        listener = self.remote_listeners.pop((address, port), None)
+        if listener:
+            listener.close()
+
 
 class SSHServer:
     def __init__(self, key, service_port):
         self.key, self.service_port = key, service_port
         self.deny = False
+        self.deny_remote = False
         self.requests, self.transports = [], []
+        self.policies = []
         self.stopped = threading.Event()
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
@@ -108,6 +138,8 @@ class SSHServer:
             self.transports.append(transport)
             transport.add_server_key(self.key)
             policy = Policy(self)
+            policy.transport = transport
+            self.policies.append(policy)
             try:
                 transport.start_server(server=policy)
             except (EOFError, paramiko.SSHException):
@@ -116,6 +148,37 @@ class SSHServer:
             threading.Thread(
                 target=self.channels, args=(transport, policy), daemon=True
             ).start()
+
+    def accept_reverse(self, transport, listener, address, port):
+        while transport.is_active() and not self.stopped.is_set():
+            try:
+                peer, origin = listener.accept()
+            except socket.timeout:  # noqa: UP041 - Python 3.9 compatibility
+                continue
+            except OSError:
+                return
+            try:
+                channel = transport.open_forwarded_tcpip_channel(
+                    origin, (address, port)
+                )
+            except (OSError, EOFError, paramiko.SSHException):
+                peer.close()
+                continue
+            threading.Thread(
+                target=self.handle_reverse, args=(peer, channel), daemon=True
+            ).start()
+
+    def handle_reverse(self, peer, channel):
+        try:
+            upload = threading.Thread(
+                target=self.pump, args=(peer, channel), daemon=True
+            )
+            upload.start()
+            self.pump(channel, peer)
+            upload.join(timeout=1)
+        finally:
+            channel.close()
+            peer.close()
 
     def channels(self, transport, policy):
         while transport.is_active() and not self.stopped.is_set():
@@ -170,6 +233,9 @@ class SSHServer:
     def close(self):
         self.stopped.set()
         self.listener.close()
+        for policy in self.policies:
+            for listener in policy.remote_listeners.values():
+                listener.close()
         for transport in self.transports:
             transport.close()
         self.thread.join(timeout=1)
@@ -323,6 +389,7 @@ def test_console_passes_server_ip_to_channel_and_displays_it(capsys):
     manager = LocalForwards(transport)
     backend = Mock()
     backend.connection.local_forwards.return_value = manager
+    backend.connection.reverse_forwards.return_value.list.return_value = []
     console = WorkspaceConsole(backend)
     local_port = free_port()
     try:
@@ -414,6 +481,144 @@ def test_closing_owner_closes_forwards(host):
         socket.create_connection(("127.0.0.1", local_port), timeout=1)
 
 
+def test_reverse_forward_reaches_local_listener_and_stops_cleanly(host, capsys):
+    _server, connection = host
+    local = socketserver.ThreadingTCPServer(("127.0.0.1", 0), ReplyAfterEOF)
+    local.daemon_threads = True
+    local_thread = threading.Thread(target=local.serve_forever, daemon=True)
+    local_thread.start()
+    remote_port = free_port()
+    backend = Mock()
+    backend.connection = connection
+    console = WorkspaceConsole(backend)
+    try:
+        console.execute(f"forward reverse add {remote_port} {local.server_address[1]}")
+        assert connection.reverse_forwards().list()[0].running
+        with socket.create_connection(("127.0.0.1", remote_port), timeout=5) as peer:
+            peer.sendall(b"nested shell path")
+            peer.shutdown(socket.SHUT_WR)
+            assert receive_all(peer) == b"reply:nested shell path"
+        console.execute("forward reverse list")
+        output = capsys.readouterr().out
+        assert f"127.0.0.1:{remote_port} -> 127.0.0.1:{local.server_address[1]}" in output
+        console.execute(f"forward reverse stop {remote_port}")
+        assert connection.reverse_forwards().list() == []
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", remote_port), timeout=1)
+        assert connection.active()
+    finally:
+        connection.reverse_forwards().close()
+        local.shutdown()
+        local.server_close()
+        local_thread.join(timeout=1)
+
+
+def test_reverse_forward_denial_and_duplicate_leave_ssh_usable(host):
+    server, connection = host
+    manager = connection.reverse_forwards()
+    server.deny_remote = True
+    with pytest.raises(WorkspaceError, match="refused"):
+        manager.add(free_port(), 4444)
+    assert manager.list() == []
+    server.deny_remote = False
+    remote_port = free_port()
+    manager.add(remote_port, 4444)
+    with pytest.raises(WorkspaceError, match="already has a reverse forward"):
+        manager.add(remote_port, 5555)
+    with pytest.raises(WorkspaceError, match="Only one reverse forward"):
+        manager.add(free_port(), 5555)
+    with pytest.raises(WorkspaceError, match="Reverse bind IP"):
+        manager.add(free_port(), 5555, bind_ip="192.0.2.1")
+    assert manager.list()[0].remote_port == remote_port
+    assert connection.active()
+
+
+def test_external_reverse_bind_is_explicit_and_passed_to_ssh():
+    transport = Mock()
+    transport.is_active.return_value = True
+    transport.request_port_forward.return_value = 4444
+    manager = ReverseForwards(transport)
+    try:
+        status = manager.add(4444, 5555, bind_ip="0.0.0.0")
+        assert status.remote_endpoint == "0.0.0.0:4444"
+        assert status.local_port == 5555
+        args, kwargs = transport.request_port_forward.call_args
+        assert args == ("0.0.0.0", 4444)
+        assert callable(kwargs["handler"])
+    finally:
+        manager.close()
+    transport.cancel_port_forward.assert_called_once_with("0.0.0.0", 4444)
+
+
+def test_reverse_forward_command_routes_through_pwncat_parser(host):
+    from pwncat.manager import Manager
+    from pwncat.workspace.console_commands import ForwardCommand
+
+    _server, connection = host
+    backend = Mock()
+    backend.connection = connection
+    workspace = WorkspaceConsole(backend)
+    manager = Manager(config=io.StringIO("set -g db memory://"))
+    manager.workspace_console = workspace
+    manager.parser.commands.insert(0, ForwardCommand(manager))
+    remote_port = free_port()
+    try:
+        manager.parser.dispatch_line(f"forward reverse add {remote_port} 4444")
+        assert connection.reverse_forwards().list()[0].remote_port == remote_port
+        manager.parser.dispatch_line(f"forward reverse stop {remote_port}")
+        assert connection.reverse_forwards().list() == []
+    finally:
+        connection.reverse_forwards().close()
+        manager.db.close()
+
+
+def test_stopping_reverse_forward_closes_active_client(host):
+    _server, connection = host
+    local = socket.socket()
+    local.bind(("127.0.0.1", 0))
+    local.listen(1)
+    remote_port = free_port()
+    manager = connection.reverse_forwards()
+    try:
+        manager.add(remote_port, local.getsockname()[1])
+        with socket.create_connection(("127.0.0.1", remote_port), timeout=5) as caller:
+            caller.settimeout(5)
+            accepted, _ = local.accept()
+            try:
+                wait_until(lambda: manager.list()[0].connections == 1)
+                manager.stop(remote_port)
+                assert caller.recv(1) == b""
+            finally:
+                accepted.close()
+    finally:
+        manager.close()
+        local.close()
+
+
+def test_reverse_forward_reports_missing_local_listener(host):
+    _server, connection = host
+    remote_port, local_port = free_port(), free_port()
+    manager = connection.reverse_forwards()
+    manager.add(remote_port, local_port)
+    with socket.create_connection(("127.0.0.1", remote_port), timeout=5) as caller:
+        caller.settimeout(5)
+        assert caller.recv(1) == b""
+    wait_until(lambda: manager.list()[0].error is not None)
+    assert "local listener" in manager.list()[0].error
+    assert connection.active()
+
+
+def test_reverse_forward_closes_on_ssh_loss_and_is_not_restored(host):
+    _server, connection = host
+    remote_port = free_port()
+    manager = connection.reverse_forwards()
+    manager.add(remote_port, 4444)
+    connection.client.get_transport().close()
+    wait_until(lambda: not manager.list()[0].running)
+    connection.connect()
+    assert connection.reverse_forwards().list() == []
+
+
 @pytest.fixture
 def persistent_console(host, tmp_path, monkeypatch):
     from pwncat.workspace.model import WorkspaceRef
@@ -455,6 +660,66 @@ def test_saved_forward_reopens_on_fresh_connection_and_stop_removes_it(
     connection.connect()
     assert settings.restore(connection.local_forwards()) == []
     assert connection.local_forwards().list() == []
+
+
+def test_saved_reverse_forward_reopens_on_fresh_connection_and_stop_removes_it(
+    host, persistent_console
+):
+    _server, connection = host
+    console, settings, store = persistent_console
+    local = socketserver.ThreadingTCPServer(("127.0.0.1", 0), ReplyAfterEOF)
+    local.daemon_threads = True
+    local_thread = threading.Thread(target=local.serve_forever, daemon=True)
+    local_thread.start()
+    remote_port = free_port()
+    try:
+        console.execute(f"forward reverse add {remote_port} {local.server_address[1]}")
+        assert store.get("lab").reverse_forwards[0].remote_port == remote_port
+        connection.close()
+        connection.connect()
+        messages = settings.restore_reverse(connection.reverse_forwards())
+        assert "Restored reverse forward" in messages[0]
+        with socket.create_connection(("127.0.0.1", remote_port), timeout=5) as peer:
+            peer.sendall(b"after restart")
+            peer.shutdown(socket.SHUT_WR)
+            assert receive_all(peer) == b"reply:after restart"
+        console.execute(f"forward reverse stop {remote_port}")
+        assert store.get("lab").reverse_forwards == ()
+        connection.close()
+        connection.connect()
+        assert settings.restore_reverse(connection.reverse_forwards()) == []
+    finally:
+        connection.reverse_forwards().close()
+        local.shutdown()
+        local.server_close()
+        local_thread.join(timeout=1)
+
+
+def test_forward_without_arguments_lists_local_and_reverse_together(
+    host, persistent_console, capsys
+):
+    from pwncat.workspace.console_commands import ForwardCommand
+
+    server, connection = host
+    console, _settings, _store = persistent_console
+    local_port, remote_port = free_port(), free_port()
+    try:
+        console.execute(f"forward add {local_port} {server.service_port}")
+        console.execute(f"forward reverse add {remote_port} 4444")
+        command = ForwardCommand(Mock(workspace_console=console))
+        parsed = command.parser.parse_args([])
+        assert parsed.action is None
+        command.run(command.manager, parsed)
+        output = capsys.readouterr().out
+        assert f"Local 127.0.0.1:{local_port}" in output
+        assert f"Reverse SSH host 127.0.0.1:{remote_port}" in output
+        assert output.count(" saved") >= 2
+        console.execute("forward list")
+        output = capsys.readouterr().out
+        assert "Local 127.0.0.1:" in output and "Reverse SSH host" in output
+    finally:
+        connection.local_forwards().close()
+        connection.reverse_forwards().close()
 
 
 def test_restore_busy_listener_is_retained_and_can_be_removed(

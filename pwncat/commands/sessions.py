@@ -7,6 +7,14 @@ from pwncat.util import console
 from pwncat.commands import Complete, Parameter, CommandDefinition
 
 
+def _transfer_busy(manager, session):
+    from pwncat.workspace.background_transfers import BackgroundTransfers
+
+    owner = getattr(manager, "workspace_console", None)
+    transfers = getattr(owner, "transfers", None)
+    return isinstance(transfers, BackgroundTransfers) and transfers.busy_session(session)
+
+
 class Command(CommandDefinition):
     """
     Interact and control active remote sessions. This command can be used
@@ -53,8 +61,11 @@ class Command(CommandDefinition):
                 if session is manager.target:
                     ident = "*" + ident
                     kwargs["style"] = "underline"
-                user = session.current_user()
-                if user is None:
+                busy = _transfer_busy(manager, session)
+                user = None if busy else session.current_user()
+                if busy:
+                    user_name = "transfer running"
+                elif user is None:
                     # A live account may not have a matching user record.
                     # Show its identifier without inventing a username.
                     uid = session.platform.getuid()
@@ -85,6 +96,13 @@ class Command(CommandDefinition):
             return
 
         session = manager.sessions[args.session_id]
+
+        if _transfer_busy(manager, session):
+            console.log(
+                f"[yellow]session-{args.session_id} is busy with a background transfer; "
+                "use 'transfers' to check it[/yellow]"
+            )
+            return
 
         if args.kill:
             channel = str(session.platform.channel)

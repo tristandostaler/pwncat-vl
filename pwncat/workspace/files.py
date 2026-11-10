@@ -68,7 +68,7 @@ class FileService:
         if not overwrite:
             raise WorkspaceError("Destination exists; use --overwrite explicitly.")
 
-    def upload(self, source, destination, *, overwrite=False, progress=None):
+    def upload(self, source, destination, *, overwrite=False, progress=None, status=None):
         destination = remote_path(destination)
         self._destination(destination, overwrite)
         source = os.path.expanduser(source)
@@ -87,6 +87,8 @@ class FileService:
                 before = os.fstat(local.fileno())
                 if not stat.S_ISREG(before.st_mode):
                     raise WorkspaceError("Source must be a regular file.")
+                if status:
+                    status("copying", before.st_size)
                 with self.sftp.open(temporary, "wx") as remote:
                     self.sftp.chmod(temporary, 0o600)
                     result = copy_stream(local, remote, progress)
@@ -99,11 +101,15 @@ class FileService:
                 raise WorkspaceError(
                     "Source changed during upload; destination was not published."
                 )
+            if status:
+                status("verifying", before.st_size)
             with self.sftp.open(temporary, "rb") as remote:
                 if stream_hash(remote) != result.sha256:
                     raise WorkspaceError(
                         "Upload verification failed; destination was not published."
                     )
+            if status:
+                status("publishing", before.st_size)
             self._destination(destination, overwrite)
             if overwrite:
                 self.sftp.posix_rename(temporary, destination)
@@ -121,13 +127,15 @@ class FileService:
                 except (OSError, EOFError):
                     pass  # Connection loss may leave a private partial directory.
 
-    def download(self, source, destination, *, overwrite=False, progress=None):
+    def download(self, source, destination, *, overwrite=False, progress=None, status=None):
         source = remote_path(source)
         before = self.sftp.lstat(source)
         if not stat.S_ISREG(before.st_mode):
             raise WorkspaceError(
                 "Source must be a regular remote file (symlinks are refused)."
             )
+        if status:
+            status("copying", before.st_size)
         destination = os.path.abspath(os.path.expanduser(destination))
         if os.path.lexists(destination):
             if not stat.S_ISREG(os.lstat(destination).st_mode):
@@ -152,9 +160,13 @@ class FileService:
                 raise WorkspaceError(
                     "Remote source changed during download; destination was not published."
                 )
+            if status:
+                status("verifying", before.st_size)
             with open(temporary, "rb") as local:
                 if stream_hash(local) != result.sha256:
                     raise WorkspaceError("Download verification failed.")
+            if status:
+                status("publishing", before.st_size)
             if overwrite:
                 os.replace(temporary, destination)
             else:

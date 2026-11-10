@@ -11,9 +11,9 @@ Implementation is delegated to the existing ``WorkspaceConsole`` methods
 ``print_panes`` / ``transfer`` helpers, imported lazily to avoid an import
 cycle with ``console.py``.
 
-``upload`` and ``download`` are inserted before pwncat's own versions so the
-workspace guarantees (SFTP staging, atomic rename, SHA-256 verification,
-``--overwrite``) are kept.  ``lcd`` / ``lpwd`` / ``help`` are not registered:
+``upload`` and ``download`` are inserted before pwncat's own versions so they
+follow the selected pwncat session. The workspace session uses SFTP; other
+sessions use their platform's file API. ``lcd`` / ``lpwd`` / ``help`` are not registered:
 pwncat's versions govern the local transfer directory and the full command
 index.
 """
@@ -42,29 +42,34 @@ class _Base(CommandDefinition):
         return self.manager.workspace_backend
 
 class ForwardCommand(_Base):
-    """Manage local forwards to services on the connected SSH host.
+    """Manage local and reverse forwards over the workspace SSH connection.
 
     ``forward add LOCAL_PORT [SERVER_IP] REMOTE_PORT`` forwards
     ``127.0.0.1:LOCAL_PORT`` to ``SERVER_IP:REMOTE_PORT`` through the existing
     authenticated SSH connection.  ``SERVER_IP`` defaults to ``127.0.0.1`` and
     must be a loopback address or the connected SSH peer's IP.
-    ``forward list`` shows active forwards, clients and saved settings.
+    ``forward`` or ``forward list`` shows local and reverse forwards together.
     ``forward stop LOCAL_PORT`` also removes the saved setting.
+    ``forward reverse add REMOTE_PORT LOCAL_PORT [BIND_IP]`` listens on the
+    SSH host and connects to local 127.0.0.1:LOCAL_PORT. BIND_IP defaults to
+    127.0.0.1; 0.0.0.0 requests access from other hosts if SSH permits it.
+    Reverse forwards are saved with the workspace and restored on attach.
     """
 
     PROG = "forward"
     ARGS = {
         "action": Parameter(
             Complete.CHOICES,
+            nargs="?",
             metavar="ACTION",
-            choices=["add", "list", "stop"],
-            help="add / list / stop",
+            choices=["add", "list", "stop", "reverse"],
+            help="add / list / stop / reverse",
         ),
         "args": Parameter(Complete.NONE, nargs="*", metavar="ARG"),
     }
 
     def run(self, manager, args):
-        self.console.forward([args.action, *args.args])
+        self.console.forward(([] if args.action is None else [args.action]) + args.args)
 
 class PanesCommand(_Base):
     """List panes across all windows; * marks the selected pane."""
@@ -137,19 +142,27 @@ class StatusCommand(_Base):
         self.console.status()
 
 class UploadCommand(_Base):
-    """Upload through the workspace SSH account (SFTP, SHA-256 verified)."""
+    """Upload to the selected pwncat session; verify the remote bytes."""
 
     PROG = "upload"
     ARGS = {
         "source": Parameter(Complete.LOCAL_FILE),
         "destination": Parameter(Complete.REMOTE_FILE),
         "--overwrite": Parameter(Complete.NONE, action="store_true"),
+        "--background,-b": Parameter(Complete.NONE, action="store_true"),
     }
 
     def run(self, manager, args):
-        from pwncat.workspace.console import transfer
+        from pwncat.workspace.console import transfer_selected
 
-        transfer(
+        if getattr(args, "background", False):
+            self.console.start_transfer(
+                "upload", self.console.local_path(args.source), args.destination,
+                args.overwrite,
+            )
+            return
+        transfer_selected(
+            manager,
             self.backend,
             "upload",
             self.console.local_path(args.source),
@@ -159,19 +172,27 @@ class UploadCommand(_Base):
         )
 
 class DownloadCommand(_Base):
-    """Download through the workspace SSH account (SFTP, SHA-256 verified)."""
+    """Download from the selected pwncat session; verify the local bytes."""
 
     PROG = "download"
     ARGS = {
         "source": Parameter(Complete.REMOTE_FILE),
         "destination": Parameter(Complete.LOCAL_FILE),
         "--overwrite": Parameter(Complete.NONE, action="store_true"),
+        "--background,-b": Parameter(Complete.NONE, action="store_true"),
     }
 
     def run(self, manager, args):
-        from pwncat.workspace.console import transfer
+        from pwncat.workspace.console import transfer_selected
 
-        transfer(
+        if getattr(args, "background", False):
+            self.console.start_transfer(
+                "download", args.source, self.console.local_path(args.destination),
+                args.overwrite,
+            )
+            return
+        transfer_selected(
+            manager,
             self.backend,
             "download",
             args.source,
@@ -179,6 +200,15 @@ class DownloadCommand(_Base):
             args.overwrite,
             console=output_console(self.state),
         )
+
+class TransfersCommand(_Base):
+    """Show the current or most recent background file transfer."""
+
+    PROG = "transfers"
+    ARGS = {}
+
+    def run(self, manager, args):
+        self.console.transfer_status()
 
 class ColorCommand(_Base):
     """Control console colours (auto / on / off); 'on' overrides NO_COLOR."""
@@ -229,6 +259,7 @@ WORKSPACE_COMMANDS = [
     StatusCommand,
     UploadCommand,
     DownloadCommand,
+    TransfersCommand,
     ColorCommand,
     ResumeCommand,
     DetachCommand,

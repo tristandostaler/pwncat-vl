@@ -14,20 +14,22 @@ therefore available (``run``, ``search``, ``use``, ``set``, ``sessions``,
 bindings and database history.  Workspace actions are registered as normal
 ``CommandDefinition`` objects by ``console_commands.WORKSPACE_COMMANDS``.
 
-``run()`` still returns ``"detach"`` or ``"resume"`` so ``cli.interact`` keeps
-its existing routing and reconnect behaviour.
+``run()`` returns ``"resume"``, ``"park"`` or ``"detach"`` to the outer loop.
 """
 from __future__ import annotations
 
 import os
 import shlex
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.formatted_text import merge_formatted_text
 from rich import box
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
+from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TimeRemainingColumn, TransferSpeedColumn
 
 from pwncat.channel import ChannelError
 from pwncat.manager import InteractiveExit, Manager
@@ -36,9 +38,10 @@ from . import ConnectionLost, OutcomeUnknown, WorkspaceError
 from .console_history import ConsoleHistory
 from .console_ui import colors_enabled, output_console
 from .files import FileService
+from .background_transfers import BackgroundTransfers, progress_text
 from .forwarding import LOOPBACK, destination_address, port_number
 from .model import pane_id, safe_text
-from .saved_forwards import SavedForwards
+from .saved_forwards import SavedForwards, SavedListeners
 
 COMMANDS = {
     "help": ("help [COMMAND]", "Show workspace commands and usage."),
@@ -72,13 +75,14 @@ COMMANDS = {
         "Download through the workspace SSH account.",
     ),
     "forward": (
-        "forward add LOCAL_PORT [SERVER_IP] REMOTE_PORT | list | stop LOCAL_PORT",
-        "Manage local forwards to services on the connected SSH host.",
+        "forward [list] | add LOCAL_PORT [SERVER_IP] REMOTE_PORT | stop LOCAL_PORT | reverse add REMOTE_PORT LOCAL_PORT [BIND_IP] | reverse list | reverse stop REMOTE_PORT",
+        "Manage local and reverse SSH forwards.",
     ),
     "lpwd": ("lpwd", "Show the local directory used for transfer paths."),
     "lcd": ("lcd DIRECTORY", "Change the local transfer directory."),
     "resume": ("resume", "Return to the selected remote pane."),
     "detach": ("detach", "Leave the workspace; remote processes keep running."),
+    "transfers": ("transfers", "Show the current or most recent background transfer."),
 }
 
 def message(text, style="", *, console=None):
@@ -98,6 +102,7 @@ class ConsoleState:
     history: InMemoryHistory = field(default_factory=InMemoryHistory, repr=False)
     color_mode: str = "auto"
     forward_settings: SavedForwards | None = field(default=None, repr=False)
+    listener_settings: SavedListeners | None = field(default=None, repr=False)
     history_store: ConsoleHistory | None = field(default=None, repr=False)
     history_loaded: bool = False
     # Set by ``resume`` / ``detach`` / connection loss and read by ``run``.
@@ -137,11 +142,68 @@ def print_panes(backend, selected=None, *, console=None):
             f"{'exited' if pane.dead else 'running'} {safe_text(pane.directory)}"
         )
 
-def transfer(backend, action, source, destination, overwrite=False, *, console=None):
+@contextmanager
+def _transfer_progress(console, action):
+    if console is None or not console.is_terminal:
+        yield None, None
+        return
+    with Progress(
+        TextColumn("{task.description}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=True,
+        refresh_per_second=4,
+    ) as display:
+        task = display.add_task(action, total=None)
+
+        def phase_changed(phase, total):
+            display.update(task, description=phase, total=total)
+            display.refresh()
+
+        yield (
+            lambda count: display.update(task, completed=count),
+            phase_changed,
+        )
+
+
+def transfer(backend, action, source, destination, overwrite=False, *, console=None, progress=None, status=None):
     service = FileService(backend.connection.filesystem())
-    result = getattr(service, action)(source, destination, overwrite=overwrite)
+    result = getattr(service, action)(
+        source, destination, overwrite=overwrite, progress=progress, status=status
+    )
     message(
         f"Transferred {result.size} bytes; SHA-256 {result.sha256}",
+        "green",
+        console=console,
+    )
+
+
+def transfer_selected(manager, backend, action, source, destination, overwrite=False, *, console=None):
+    """Use the active pwncat session, retaining SFTP for the workspace session."""
+    session = manager.target
+    if session is None:
+        raise WorkspaceError("Select an active session before transferring a file.")
+    from .platform import WorkspaceChannel
+
+    if isinstance(session.platform.channel, WorkspaceChannel):
+        with _transfer_progress(console, action) as (progress, status):
+            transfer(
+                backend, action, source, destination, overwrite, console=console,
+                progress=progress, status=status,
+            )
+        return
+    from . import session_files
+
+    with _transfer_progress(console, action) as (progress, status):
+        result = getattr(session_files, action)(
+            session.platform, source, destination, overwrite=overwrite,
+            progress=progress, status=status,
+        )
+    message(
+        f"Transferred {result.size} bytes in session {session.id}; SHA-256 {result.sha256}",
         "green",
         console=console,
     )
@@ -151,10 +213,13 @@ class WorkspaceConsole:
         self.backend = backend
         self.state = state if state is not None else ConsoleState()
         self._manager = None
+        self._workspace_session_ready = False
+        self.transfers = BackgroundTransfers(on_update=self._refresh_progress)
 
     def close(self):
         """Release the console on detach or connection loss, never on resume."""
         manager, self._manager = self._manager, None
+        self._workspace_session_ready = False
         if manager is None:
             return
         manager.interactive_running = False
@@ -174,6 +239,68 @@ class WorkspaceConsole:
 
     def message(self, text, style=""):
         message(text, style, console=output_console(self.state))
+
+    def _refresh_progress(self):
+        manager = self._manager
+        prompt = manager.parser.prompt if manager is not None else None
+        app = getattr(prompt, "app", None)
+        if app is not None and app.is_running:
+            app.invalidate()
+
+    def start_transfer(self, action, source, destination, overwrite=False):
+        session = self._manager.target
+        if session is None:
+            raise WorkspaceError("Select an active session before transferring a file.")
+        from .platform import WorkspaceChannel
+
+        fallback = None
+        if not isinstance(session.platform.channel, WorkspaceChannel):
+            fallback = next(
+                (
+                    other for other in self._manager.sessions.values()
+                    if isinstance(other.platform.channel, WorkspaceChannel)
+                ),
+                None,
+            )
+            if fallback is None:
+                raise WorkspaceError(
+                    "A workspace SSH session is required to keep the console usable during this transfer."
+                )
+        status = self.transfers.start(
+            session, self.backend.connection, action, source, destination,
+            overwrite=overwrite,
+        )
+        if fallback is not None:
+            self._manager.target = fallback
+        self.message(
+            f"Started transfer {status.number} in session {status.session_id}. "
+            + (
+                f"Switched to workspace session {fallback.id} while it runs. "
+                if fallback is not None else ""
+            )
+            + "Use 'transfers' to check its result.",
+            "green",
+        )
+
+    def transfer_status(self):
+        status = self.transfers.status()
+        if status is None:
+            self.message("No background transfer has been started.", "dim")
+        elif status.state == "running":
+            self.message(
+                f"Transfer {status.number}: {status.action} in session {status.session_id}: "
+                + progress_text(status),
+                "cyan",
+            )
+        elif status.state == "completed":
+            self.message(
+                f"Transfer {status.number}: completed {status.size} bytes; SHA-256 {status.sha256}",
+                "green",
+            )
+        else:
+            self.message(
+                f"Transfer {status.number}: failed: {status.error}", "red",
+            )
 
     def detail(self, label, value):
         detail(label, value, console=output_console(self.state))
@@ -337,7 +464,9 @@ class WorkspaceConsole:
         return None
 
     def forward(self, args):
-        if not args or args == ["list"]:
+        if args and args[0] == "reverse":
+            self.reverse_forward(args[1:])
+        elif not args or args == ["list"]:
             manager = self.backend.connection.local_forwards()
             entries, saved_ports = manager.list(), set()
             if self.state.forward_settings:
@@ -348,17 +477,18 @@ class WorkspaceConsole:
                         "Saved forward settings unavailable: " + safe_text(exc),
                         "yellow",
                     )
-            if not entries:
-                self.message("No local forwards in this connection.", "dim")
             for entry in entries:
                 self.message(
-                    f"127.0.0.1:{entry.local_port} -> SSH host {entry.remote_endpoint} "
+                    f"Local 127.0.0.1:{entry.local_port} -> SSH host {entry.remote_endpoint} "
                     f"{'listening' if entry.running else 'stopped'} connections={entry.connections}"
                     + (" saved" if entry.local_port in saved_ports else ""),
                     "cyan" if entry.running else "yellow",
                 )
                 if entry.error:
                     self.message(" Last error: " + safe_text(entry.error), "yellow")
+            reverse_entries = self._list_reverse()
+            if not entries and not reverse_entries:
+                self.message("No local or reverse forwards in this connection.", "dim")
         elif len(args) in (3, 4) and args[0] == "add":
             local, remote = port_number(args[1]), port_number(args[-1])
             destination = str(
@@ -404,6 +534,65 @@ class WorkspaceConsole:
         else:
             self.usage("forward")
 
+    def reverse_forward(self, args):
+        manager = self.backend.connection.reverse_forwards()
+        if args == ["list"]:
+            if not self._list_reverse():
+                self.message("No reverse forwards in this connection.", "dim")
+        elif len(args) in (3, 4) and args[0] == "add":
+            remote, local = port_number(args[1]), port_number(args[2])
+            bind_ip = args[3] if len(args) == 4 else LOOPBACK
+            entry = manager.add(remote, local, bind_ip=bind_ip)
+            if self.state.forward_settings:
+                try:
+                    self.state.forward_settings.remember_reverse(manager, entry)
+                except (WorkspaceError, OSError) as exc:
+                    manager.stop(remote)
+                    raise WorkspaceError(
+                        "Could not save the reverse forward; its new listener was stopped: "
+                        + safe_text(exc)
+                    ) from exc
+            self.message(
+                f"Requested SSH host {entry.remote_endpoint} -> 127.0.0.1:{entry.local_port}.",
+                "green",
+            )
+            if entry.bind_ip == "0.0.0.0":
+                self.message(
+                    "Other hosts can connect only if the SSH server permits external remote binds (GatewayPorts).",
+                    "dim",
+                )
+            if self.state.forward_settings:
+                self.message("Saved for automatic restoration on attach/reconnect.", "dim")
+        elif len(args) == 2 and args[0] == "stop":
+            remote = port_number(args[1])
+            if self.state.forward_settings:
+                self.state.forward_settings.stop_reverse(manager, remote)
+                self.message(f"Stopped reverse forward on SSH host port {remote}; saved setting removed.", "green")
+            else:
+                manager.stop(remote)
+                self.message(f"Stopped reverse forward on SSH host port {remote}.", "green")
+        else:
+            self.usage("forward")
+
+    def _list_reverse(self):
+        manager = self.backend.connection.reverse_forwards()
+        entries, saved_ports = manager.list(), set()
+        if self.state.forward_settings:
+            try:
+                entries, saved_ports = self.state.forward_settings.view_reverse(manager)
+            except (WorkspaceError, OSError) as exc:
+                self.message("Saved reverse settings unavailable: " + safe_text(exc), "yellow")
+        for entry in entries:
+            self.message(
+                f"Reverse SSH host {entry.remote_endpoint} -> 127.0.0.1:{entry.local_port} "
+                f"{'listening' if entry.running else 'stopped'} connections={entry.connections}"
+                + (" saved" if entry.remote_port in saved_ports else ""),
+                "cyan" if entry.running else "yellow",
+            )
+            if entry.error:
+                self.message(" Last error: " + safe_text(entry.error), "yellow")
+        return entries
+
     def status(self):
         self.backend._verify()
         profile = self.backend.connection.profile
@@ -430,11 +619,13 @@ class WorkspaceConsole:
         )
         self.detail("Observed directory", pane.directory)
         self.message(
-            "Transfers use absolute paths on the SSH host, including when a pane enters another host or account.",
+            "The workspace SSH session uses absolute remote paths; 'sessions ID' can select another transfer target.",
             "dim",
         )
 
     def run(self):
+        from . import local_screen
+
         self.state.exit_reason = None
         # On entry, native tmux owns the current selection. During the console,
         # explicit stable IDs remain authoritative even if a pane disappears.
@@ -453,17 +644,68 @@ class WorkspaceConsole:
                     self.state.history_store = None
         self.message(
             "\nWorkspace console. Normal pwncat commands and workspace commands are available. "
-            "'detach' leaves the workspace; Ctrl+Q or 'resume' returns to the pane.",
+            + (
+                "Ctrl+Q parks this live console for 'workspace attach'; 'resume' returns to the pane; 'detach' closes this client."
+                if local_screen.managed()
+                else "Ctrl+Q or 'detach' leaves the workspace; 'resume' returns to the pane."
+            ),
             "bold magenta",
         )
         return self._run_pwncat_console()
 
     def _run_pwncat_console(self):
         """Re-enter the same console and active session after a tmux visit."""
-        from .console_commands import WORKSPACE_COMMANDS
         from .platform import WorkspaceChannel
 
+        manager = self.prepare_manager()
+        if not self._workspace_session_ready:
+            channel = None
+            try:
+                channel = WorkspaceChannel(self.backend)
+                manager.create_session(
+                    platform="linux", channel=channel, active=True
+                )
+                self._workspace_session_ready = True
+            except Exception as exc:
+                if channel is not None:
+                    channel.close()
+                self.close()
+                raise WorkspaceError(
+                    "Could not open the pwncat console over the workspace SSH account: "
+                    + safe_text(exc)
+                ) from exc
+
+        try:
+            self._manager.interactive(confirm_exit=False)
+        except InteractiveExit:
+            pass
+
+        from . import local_screen
+
+        reason = self.state.exit_reason or ("park" if local_screen.managed() else "detach")
+        if reason == "connection-lost" or not self.backend.connection.active():
+            self.close()
+            raise ConnectionLost("SSH disconnected; the console was not replayed.")
+        if reason == "detach":
+            if self.transfers.active():
+                self.message(
+                    "A background transfer is still running. "
+                    + (
+                        "Use Ctrl+Q to park this client, or wait for it to finish."
+                        if local_screen.managed()
+                        else "Wait for it to finish before leaving this client."
+                    ),
+                    "yellow",
+                )
+                return "busy"
+            self.close()
+        return reason
+
+    def prepare_manager(self):
+        """Create the listener owner before display, without opening a shell pane."""
         if self._manager is None:
+            from .console_commands import WORKSPACE_COMMANDS
+
             manager = self._manager = Manager()
             manager.workspace_console = self
             manager.workspace_state = self.state
@@ -474,6 +716,21 @@ class WorkspaceConsole:
             manager.parser.commands[:0] = [
                 cls(manager) for cls in WORKSPACE_COMMANDS
             ]
+
+            original_toolbar = manager.parser._render_toolbar
+
+            def workspace_toolbar():
+                rendered = original_toolbar()
+                current = self.transfers.status()
+                if current is not None:
+                    if current.state == "running":
+                        extra = f" | Transfer {current.number}: {progress_text(current)}"
+                    else:
+                        extra = f" | Transfer {current.number}: {current.state} (details: transfers)"
+                    return merge_formatted_text([rendered, extra])
+                return rendered
+
+            manager.parser._render_toolbar = workspace_toolbar
 
             original_dispatch = manager.parser.dispatch_line
 
@@ -495,31 +752,4 @@ class WorkspaceConsole:
                 return result
 
             manager.parser.dispatch_line = dispatch
-
-            channel = None
-            try:
-                channel = WorkspaceChannel(self.backend)
-                manager.create_session(
-                    platform="linux", channel=channel, active=True
-                )
-            except Exception as exc:
-                if channel is not None:
-                    channel.close()
-                self.close()
-                raise WorkspaceError(
-                    "Could not open the pwncat console over the workspace SSH account: "
-                    + safe_text(exc)
-                ) from exc
-
-        try:
-            self._manager.interactive(confirm_exit=False)
-        except InteractiveExit:
-            pass
-
-        reason = self.state.exit_reason or "resume"
-        if reason == "connection-lost" or not self.backend.connection.active():
-            self.close()
-            raise ConnectionLost("SSH disconnected; the console was not replayed.")
-        if reason == "detach":
-            self.close()
-        return reason
+        return self._manager

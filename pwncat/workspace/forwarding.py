@@ -1,4 +1,4 @@
-"""Live local forwards to services on the authenticated SSH host."""
+"""Live TCP forwards over the authenticated workspace SSH connection."""
 
 from __future__ import annotations
 
@@ -304,6 +304,157 @@ class LocalForwards:
         entry = self.entries.pop(local_port, None)
         if entry is None:
             raise WorkspaceError("No local forward uses that port in this connection.")
+        entry.stop()
+
+    def close(self):
+        entries, self.entries = list(self.entries.values()), {}
+        for entry in entries:
+            entry.stop()
+
+
+@dataclass(frozen=True)
+class ReverseForwardStatus:
+    remote_port: int
+    local_port: int
+    bind_ip: str
+    running: bool
+    connections: int
+    error: str | None
+
+    @property
+    def remote_endpoint(self):
+        host = f"[{self.bind_ip}]" if ":" in self.bind_ip else self.bind_ip
+        return f"{host}:{self.remote_port}"
+
+
+class ReverseForward:
+    """SSH server listener whose incoming channels reach local loopback."""
+
+    def __init__(self, transport, remote_port, local_port, bind_ip):
+        self.transport = transport
+        self.remote_port, self.local_port = remote_port, local_port
+        self.bind_ip = bind_ip
+        self.stopped = threading.Event()
+        self.lock = threading.RLock()
+        self.peers, self.channels = set(), set()
+        self.error = None
+
+    def start(self):
+        try:
+            assigned = self.transport.request_port_forward(
+                self.bind_ip, self.remote_port, handler=self._incoming
+            )
+        except (OSError, EOFError, paramiko.SSHException) as exc:
+            raise WorkspaceError(
+                "SSH server refused the reverse listener or its port is unavailable: "
+                + str(exc)
+            ) from exc
+        if assigned != self.remote_port:
+            try:
+                self.transport.cancel_port_forward(self.bind_ip, assigned)
+            except (OSError, EOFError, paramiko.SSHException):
+                pass
+            self.stopped.set()
+            raise WorkspaceError("SSH server assigned a different remote port.")
+
+    def status(self):
+        with self.lock:
+            return ReverseForwardStatus(
+                self.remote_port,
+                self.local_port,
+                self.bind_ip,
+                not self.stopped.is_set() and self.transport.is_active(),
+                len(self.channels),
+                self.error,
+            )
+
+    def _incoming(self, channel, _origin, _server):
+        with self.lock:
+            if self.stopped.is_set() or len(self.channels) >= 16:
+                close_stream(channel)
+                self.error = "Connection limit reached or forward stopped."
+                return
+            self.channels.add(channel)
+        threading.Thread(
+            target=self._handle,
+            args=(channel,),
+            name="workspace-reverse-forward-client",
+            daemon=True,
+        ).start()
+
+    def _handle(self, channel):
+        peer = None
+        try:
+            peer = socket.create_connection((LOOPBACK, self.local_port), timeout=3)
+            with self.lock:
+                if self.stopped.is_set():
+                    return
+                self.peers.add(peer)
+            relay(peer, channel, self.stopped)
+        except (OSError, EOFError, ValueError, paramiko.SSHException):
+            if not self.stopped.is_set():
+                with self.lock:
+                    self.error = "A connection failed; check the local listener and SSH connection."
+        finally:
+            if peer is not None:
+                close_stream(peer)
+            close_stream(channel)
+            with self.lock:
+                self.peers.discard(peer)
+                self.channels.discard(channel)
+
+    def stop(self):
+        if self.stopped.is_set():
+            return
+        self.stopped.set()
+        try:
+            if self.transport.is_active():
+                self.transport.cancel_port_forward(self.bind_ip, self.remote_port)
+        except (OSError, EOFError, paramiko.SSHException):
+            pass
+        with self.lock:
+            streams = list(self.peers) + list(self.channels)
+        for stream in streams:
+            close_stream(stream)
+
+
+class ReverseForwards:
+    """Reverse forwards belong only to the current SSH transport."""
+
+    def __init__(self, transport):
+        self.transport = transport
+        self.entries = {}
+
+    def add(self, remote_port, local_port, *, bind_ip=LOOPBACK):
+        remote_port, local_port = port_number(remote_port), port_number(local_port)
+        address = destination_address(bind_ip)
+        if str(address) not in (LOOPBACK, "0.0.0.0"):
+            raise WorkspaceError("Reverse bind IP must be 127.0.0.1 or 0.0.0.0.")
+        bind_ip = str(address)
+        if not self.transport.is_active():
+            raise WorkspaceError("SSH is disconnected; no reverse forward was started.")
+        existing = self.entries.get(remote_port)
+        if existing and existing.status().running:
+            raise WorkspaceError("That remote port already has a reverse forward. Stop it first.")
+        # paramiko-ng keeps one forwarded-TCP handler per transport; a second
+        # remote listener would silently send its channels to the wrong rule.
+        if any(entry.status().running for entry in self.entries.values()):
+            raise WorkspaceError("Only one reverse forward can run per SSH connection.")
+        if existing:
+            existing.stop()
+        forward = ReverseForward(self.transport, remote_port, local_port, bind_ip)
+        forward.start()
+        self.entries[remote_port] = forward
+        return forward.status()
+
+    def list(self):
+        return [entry.status() for _, entry in sorted(self.entries.items())]
+
+    def stop(self, remote_port):
+        remote_port = port_number(remote_port)
+        entry = self.entries.pop(remote_port, None)
+        if entry is None:
+            raise WorkspaceError("No reverse forward uses that remote port in this connection.")
         entry.stop()
 
     def close(self):

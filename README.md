@@ -95,16 +95,28 @@ to retain history only in the live workspace. `Ctrl+B` controls tmux;
 `Ctrl+G` then `p` opens the workspace console; `Ctrl+G` then `d` detaches.
 `Ctrl+]` remains available as an alternative prefix.
 The console provides `help`, `status`, `panes`, `select`, `split`, `window`,
-`upload`, `download`, `forward`, `color`, `lcd`, `lpwd`, `resume`, and `detach`.
+`upload`, `download`, `transfers`, `forward`, `color`, `lcd`, `lpwd`, `resume`, and `detach`.
+`sessions ID` selects the pwncat session used by `upload` and `download`;
+`select %ID` chooses a tmux pane.
+Use `upload --background` or `download --background` to transfer while the
+console stays responsive. Its toolbar shows bytes copied and percent, and
+`transfers` reports progress or the verified result. Foreground transfers show
+a progress bar. One background
+transfer runs at a time. Transfers on another pwncat session temporarily
+switch the console to the workspace shell because that session's channel is busy.
 It uses pwncat's colored prompt with an explicit workspace label, syntax
 highlighting, contextual Tab completion, history suggestions, and a status bar.
 Successful console commands are saved privately per workspace and recalled after
 reopening it. Start a command with a space to keep it out of saved history.
-`Ctrl+Q` returns to the pane. Use `color on` to override a terminal's `NO_COLOR`
+`Ctrl+Q` parks the live console when local `screen` is available; a later
+`workspace attach NAME` returns to the same pwncat sessions and selection.
+Use `resume` to return to the pane, or `detach` to close the local client.
+Use `color on` to override a terminal's `NO_COLOR`
 setting, or `color auto` to follow terminal settings.
 Inside the console, `forward add 8080 8000` connects local `127.0.0.1:8080` to
-`127.0.0.1:8000` on the SSH host using the current connection. Use `forward list`
-and `forward stop 8080` to manage it. Forwards close when this client disconnects.
+`127.0.0.1:8000` on the SSH host using the current connection. Use `forward`
+to list local and reverse forwards together, and `forward stop 8080` to stop
+one. Forwards close when this client disconnects.
 You can specify the destination explicitly with `forward add 8080 SERVER_IP 80`.
 `SERVER_IP` must be a loopback address or the IP used by the current SSH connection.
 Open it directly with `pwncat-vl workspace console lab`. Successful connections
@@ -122,16 +134,23 @@ KWallet. WSL uses its Linux credential service. The OS may ask to unlock or allo
 access to its vault. Without `--save-credentials`, password profiles prompt on
 each connection. Secrets are never saved in workspace JSON files.
 
-To update a saved workspace's hostname or IP address:
+To update a saved workspace's host, username, or password:
 
 ```sh
 pwncat-vl workspace edit lab --host new-host.example
+pwncat-vl workspace edit lab --username newuser
+pwncat-vl workspace edit lab --password
 pwncat-vl workspace attach lab
 ```
 
-This local edit preserves the workspace identity and console history. Saved
-credentials are cleared when the hostname changes; add `--save-credentials` on
-the next attachment to save them again. SSH host key checks still apply.
+These options can be combined. Host and username edits retain saved passwords
+and key passphrases, workspace identity, and console history. `--password`
+prompts privately twice and replaces the password in the OS credential store.
+The changes apply on the next connection. SSH host key checks still apply.
+
+After a server reset, `attach lab` starts a fresh workspace if the saved remote
+workspace is missing or confirmed stopped. Surviving files from a stopped
+workspace are archived first. Processes lost during the reset cannot be restored.
 
 To reuse a stopped workspace name while retaining its saved files:
 

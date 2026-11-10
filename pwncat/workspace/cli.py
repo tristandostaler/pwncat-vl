@@ -16,9 +16,10 @@ from .console import ConsoleState, WorkspaceConsole, print_panes, transfer
 from .console_history import ConsoleHistory
 from .credentials import CredentialStore, Secrets
 from .hostkeys import confirm_host_key
+from . import local_screen
 from .model import safe_text, workspace_name
 from .profiles import ProfileStore, SavedWorkspace
-from .saved_forwards import SavedForwards
+from .saved_forwards import SavedForwards, SavedListeners
 from .ssh import SSHConnection, SSHProfile
 from .terminal import display, terminal_size
 from .tmux import TmuxWorkspace
@@ -401,13 +402,15 @@ def interact(
     reconnect_seconds=60,
     start_console=False,
     forward_settings=None,
+    listener_settings=None,
     console_history=None,
 ):
     expected = backend.ref
     state = ConsoleState(
-        forward_settings=forward_settings, history_store=console_history
+        forward_settings=forward_settings, listener_settings=listener_settings,
+        history_store=console_history
     )
-    restore_pending = forward_settings is not None
+    restore_pending = forward_settings is not None or listener_settings is not None
     mode = "console" if start_console else "display"
     workspace_console = WorkspaceConsole(backend, state)
     print(
@@ -417,22 +420,57 @@ def interact(
         while True:
             try:
                 if restore_pending:
-                    try:
-                        for message in forward_settings.restore(
-                            backend.connection.local_forwards()
-                        ):
-                            print(safe_text(message))
-                    except (WorkspaceError, OSError) as exc:
-                        print("Saved forwards could not be restored: " + safe_text(exc))
+                    if listener_settings is not None:
+                        try:
+                            if listener_settings.rules():
+                                for message in listener_settings.restore(workspace_console.prepare_manager()):
+                                    print(safe_text(message))
+                        except (WorkspaceError, OSError) as exc:
+                            print("Saved listeners could not be restored: " + safe_text(exc))
+                    if isinstance(forward_settings, SavedForwards):
+                        try:
+                            for message in forward_settings.restore_reverse(
+                                backend.connection.reverse_forwards()
+                            ):
+                                print(safe_text(message))
+                        except (WorkspaceError, OSError) as exc:
+                            print("Saved reverse forwards could not be restored: " + safe_text(exc))
+                    if forward_settings is not None:
+                        try:
+                            for message in forward_settings.restore(
+                                backend.connection.local_forwards()
+                            ):
+                                print(safe_text(message))
+                        except (WorkspaceError, OSError) as exc:
+                            print("Saved forwards could not be restored: " + safe_text(exc))
                     restore_pending = False
                 if mode == "console":
-                    if workspace_console.run() == "detach":
+                    action = workspace_console.run()
+                    if action == "park":
+                        try:
+                            local_screen.park()
+                        except WorkspaceError as exc:
+                            print("Could not preserve the local terminal: " + safe_text(exc))
+                        continue
+                    if action == "detach":
                         return
+                    if action == "busy":
+                        continue
                     mode = "display"
                 else:
                     channel = backend.display(terminal_size(), takeover=takeover)
                     takeover = False
                     if display(channel, backend.connection) == "detach":
+                        if local_screen.managed():
+                            try:
+                                local_screen.park()
+                            except WorkspaceError as exc:
+                                print("Could not preserve the local terminal: " + safe_text(exc))
+                            continue
+                        if workspace_console.transfers.active():
+                            print("A background transfer is still running; wait for it before leaving this client.")
+                            mode = "console"
+                            continue
                         return
                     mode = "console"
             except ConnectionLost:
@@ -462,7 +500,7 @@ def interact(
                         replacement.load(expected.name, expected=expected)
                         backend = replacement
                         workspace_console = WorkspaceConsole(backend, state)
-                        restore_pending = forward_settings is not None
+                        restore_pending = forward_settings is not None or listener_settings is not None
                         break
                     except ConnectionLost:
                         connection.close()
@@ -493,6 +531,12 @@ def main(argv=None):
     connection = backend = None
     try:
         store = ProfileStore()
+        if args.action in ("new", "attach", "console") and not getattr(args, "no_attach", False) and local_screen.available():
+            alias, remote_name, base, _password, _passphrase, _expected = resolve_connection(args, store)
+            return local_screen.attach_or_start(
+                argv, alias, base, remote_name,
+                takeover=getattr(args, "takeover", False), new=args.action == "new",
+            )
         if args.action == "edit":
             if any(
                 getattr(args, option) is not None
@@ -620,6 +664,7 @@ def main(argv=None):
                     backend,
                     profile,
                     forward_settings=SavedForwards(store, alias, base, backend.ref),
+                    listener_settings=SavedListeners(store, alias, base, backend.ref),
                     console_history=ConsoleHistory(store, alias, base, backend.ref),
                 )
         elif args.action == "archive":
@@ -681,6 +726,7 @@ def main(argv=None):
                     takeover=args.takeover,
                     reconnect_seconds=args.reconnect_seconds,
                     forward_settings=SavedForwards(store, alias, base, backend.ref),
+                    listener_settings=SavedListeners(store, alias, base, backend.ref),
                     console_history=ConsoleHistory(store, alias, base, backend.ref),
                 )
             elif args.action == "console":
@@ -690,6 +736,7 @@ def main(argv=None):
                     reconnect_seconds=args.reconnect_seconds,
                     start_console=True,
                     forward_settings=SavedForwards(store, alias, base, backend.ref),
+                    listener_settings=SavedListeners(store, alias, base, backend.ref),
                     console_history=ConsoleHistory(store, alias, base, backend.ref),
                 )
             elif args.action == "status":

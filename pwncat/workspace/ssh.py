@@ -76,6 +76,7 @@ class SSHConnection:
         self.client = None
         self.sftp = None
         self._forwards = None
+        self._reverse_forwards = None
 
     def connect(self):
         self.close()
@@ -192,14 +193,21 @@ class SSHConnection:
 
     def filesystem(self):
         if self.sftp is None:
-            try:
-                self.sftp = self.client.open_sftp()
-                self.sftp.get_channel().settimeout(15)
-            except (OSError, EOFError, paramiko.SSHException) as exc:
-                raise WorkspaceError(
-                    "SFTP is required for workspace metadata and file transfers."
-                ) from exc
+            self.sftp = self.new_filesystem()
         return self.sftp
+
+    def new_filesystem(self):
+        """Open a separate SFTP channel for a background transfer."""
+        if not self.active():
+            raise ConnectionLost("SSH is disconnected.")
+        try:
+            sftp = self.client.open_sftp()
+            sftp.get_channel().settimeout(15)
+            return sftp
+        except (OSError, EOFError, paramiko.SSHException) as exc:
+            raise WorkspaceError(
+                "SFTP is required for workspace metadata and file transfers."
+            ) from exc
 
     def local_forwards(self):
         if not self.active():
@@ -210,11 +218,23 @@ class SSHConnection:
             self._forwards = LocalForwards(self.client.get_transport())
         return self._forwards
 
+    def reverse_forwards(self):
+        if not self.active():
+            raise ConnectionLost("SSH is disconnected.")
+        if self._reverse_forwards is None:
+            from .forwarding import ReverseForwards
+
+            self._reverse_forwards = ReverseForwards(self.client.get_transport())
+        return self._reverse_forwards
+
     def close(self):
         try:
             if self._forwards is not None:
                 self._forwards.close()
                 self._forwards = None
+            if self._reverse_forwards is not None:
+                self._reverse_forwards.close()
+                self._reverse_forwards = None
             if self.sftp is not None:
                 try:
                     self.sftp.close()

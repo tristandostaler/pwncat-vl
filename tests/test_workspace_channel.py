@@ -1,0 +1,62 @@
+"""Workspace SSH reads distinguish idle channels from actual disconnects."""
+
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import paramiko
+import pytest
+
+from pwncat.channel import ChannelClosed
+from pwncat.workspace.platform import WorkspaceChannel
+
+
+@pytest.fixture
+def channel():
+    # Exercise Paramiko's actual nonblocking buffer without any network access.
+    ssh_channel = paramiko.Channel(0)
+    backend = SimpleNamespace(
+        connection=SimpleNamespace(
+            profile=SimpleNamespace(host="example.invalid", port=22, user="user"),
+            client=Mock(invoke_shell=Mock(return_value=ssh_channel)),
+        )
+    )
+    instance = WorkspaceChannel(backend)
+    try:
+        yield instance
+    finally:
+        ssh_channel.close()
+
+
+@pytest.mark.parametrize("count", [None, 1024])
+def test_idle_channel_can_receive_later_data(channel, count):
+    assert channel.recv(count) == b""
+    assert channel.connected
+
+    channel.channel.in_buffer.feed(b"ready\n")
+    assert channel.recv(count) == b"ready\n"
+    assert channel.recv(count) == b""
+    assert channel.connected
+
+
+def test_peeked_data_survives_an_idle_read(channel):
+    channel.channel.in_buffer.feed(b"ready\n")
+    assert channel.peek() == b"ready\n"
+    assert channel.recv(1024) == b"ready\n"
+    assert channel.recv(1024) == b""
+    assert channel.connected
+
+
+def test_actual_eof_is_still_reported_as_closed(channel):
+    channel.channel.in_buffer.close()
+    with pytest.raises(ChannelClosed):
+        channel.recv(1024)
+    assert not channel.connected
+
+
+def test_connection_error_is_still_reported_as_closed(channel, monkeypatch):
+    failure = ConnectionResetError("connection reset")
+    monkeypatch.setattr(channel.channel, "recv", Mock(side_effect=failure))
+    with pytest.raises(ChannelClosed) as error:
+        channel.recv(1024)
+    assert error.value.__cause__ is failure
+    assert not channel.connected

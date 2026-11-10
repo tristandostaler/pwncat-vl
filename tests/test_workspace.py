@@ -342,6 +342,25 @@ def test_transfer_binary_roundtrip_and_modes(tmp_path):
 
 
 @pytest.mark.parametrize("direction", ["upload", "download"])
+def test_sftp_transfer_reports_bytes_and_verification_phase(tmp_path, direction):
+    source, target = tmp_path / "src", tmp_path / "dst"
+    source.write_bytes(bytes(range(256)) * 300)
+    counts, phases = [], []
+    result = getattr(FileService(LocalSFTP()), direction)(
+        str(source), str(target),
+        progress=counts.append,
+        status=lambda phase, total: phases.append((phase, total)),
+    )
+    assert counts and counts[-1] == result.size == source.stat().st_size
+    assert counts == sorted(counts)
+    assert phases == [
+        ("copying", result.size),
+        ("verifying", result.size),
+        ("publishing", result.size),
+    ]
+
+
+@pytest.mark.parametrize("direction", ["upload", "download"])
 def test_transfer_no_clobber_and_explicit_overwrite(tmp_path, direction):
     source, target = tmp_path / "src", tmp_path / "dst"
     source.write_bytes(b"new")
