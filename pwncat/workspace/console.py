@@ -89,6 +89,32 @@ COMMANDS = {
     ),
 }
 
+
+def _handle_workspace_mouse(event, default_mouse, scrollback):
+    """Keep unsupported X10 mouse packets out of prompt_toolkit's handler."""
+    data = event.data
+    if data.startswith("\x1b[M"):
+        if len(data) != 6:
+            return
+        button = ord(data[3])
+        # X10 encodes the button number with an offset of 32. Wheel-up
+        # packets may also carry Shift, Alt, or Control modifiers.
+        if 96 <= button <= 124 and (button - 96) % 4 == 0:
+            scrollback()
+            return
+        if button not in (32, 33, 34, 35, 64, 65, 66, 67, 97):
+            return
+    elif data.startswith("\x1b[<"):
+        try:
+            button = int(data[3:].split(";", 1)[0])
+        except ValueError:
+            return
+        if button & 0b11000011 == 64:
+            scrollback()
+            return
+    return default_mouse(event)
+
+
 def message(text, style="", *, console=None):
     output = console if console is not None else Console(emoji=False, highlight=False)
     output.print(Text(text, style=style))
@@ -781,16 +807,9 @@ class WorkspaceConsole:
 
             @manager.parser.prompt.key_bindings.add(Keys.Vt100MouseEvent)
             def workspace_mouse(event):
-                data = event.data
-                wheel_up = (
-                    data.startswith("\x1b[<64;")
-                    or (data.startswith("\x1b[M") and len(data) >= 6
-                        and (ord(data[3]) - 32) & 127 == 64)
+                return _handle_workspace_mouse(
+                    event, default_mouse, local_screen.scrollback
                 )
-                if wheel_up:
-                    local_screen.scrollback()
-                else:
-                    default_mouse(event)
         if not self._workspace_session_ready:
             channel = None
             try:
