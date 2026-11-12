@@ -19,6 +19,16 @@ INNER = "PWNCAT_WORKSPACE_SCREEN_INNER"
 DISABLE = "PWNCAT_WORKSPACE_SCREEN_DISABLE"
 
 
+def _screen_env(*, inner=False):
+    env = os.environ.copy()
+    # Older Screen releases reject terminal names longer than 20 characters.
+    if len(env.get("TERM", "")) > 20:
+        env["TERM"] = "xterm-256color"
+    if inner:
+        env[INNER] = "1"
+    return env
+
+
 @contextmanager
 def _scrollback_screenrc():
     """Start Screen with the terminal's normal alternate-screen behavior."""
@@ -93,12 +103,12 @@ def attach_or_start(argv, alias, connection, remote_name, *, takeover=False, new
         with _scrollback_screenrc() as config:
             command = [screen, "-c", config]
             command += ["-d", "-r", ident] if state == "Attached" else ["-r", ident]
-            return subprocess.call(command)
-    env = {**os.environ, INNER: "1"}
+            return subprocess.call(command, env=_screen_env())
+    env = _screen_env(inner=True)
     with _scrollback_screenrc() as config:
         command = [
             screen, "-c", config, "-m", "-S", name,
-            sys.executable, "-m", "pwncat", "workspace", *argv,
+            sys.executable, "-m", "pwncat.workspace.screen_client", *argv,
         ]
         return subprocess.call(command, env=env)
 

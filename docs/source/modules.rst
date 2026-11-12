@@ -88,6 +88,14 @@ use ``upload --background`` and ``download --background``.
 Editing Modules
 ---------------
 
+Use ``module new bootstrap.pwnbox`` to create a local module under
+``~/.local/share/pwncat/modules`` (or ``$XDG_DATA_HOME/pwncat/modules``),
+including the package files needed to load it. The command loads a starter
+``Module`` class and opens its source in the same editor as ``module edit``.
+It refuses to overwrite an existing module. Use ``module delete NAME`` to
+remove a local module after confirmation; ``--yes`` skips the prompt.
+Built-in modules cannot be deleted this way.
+
 Use ``module edit MODULE`` at the local pwncat prompt to open a module's Python source
 on your own computer. On macOS, this opens Visual Studio Code when installed;
 ``VISUAL`` or ``EDITOR`` can select another editor. The console stays usable

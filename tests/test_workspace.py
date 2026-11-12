@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import stat
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -153,6 +154,66 @@ def test_saved_auth_settings_and_option_positions(
     )
     assert ask_password is expected_password
     assert expected == saved_workspace.ref
+
+
+def test_new_workspace_prompts_for_unsaved_connection_before_screen(monkeypatch):
+    from pwncat.workspace import cli
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    prompt = Mock(side_effect=["server.example", "alice"])
+    monkeypatch.setattr("builtins.input", prompt)
+    monkeypatch.setattr(cli.local_screen, "available", lambda: True)
+    attach = Mock(return_value=0)
+    monkeypatch.setattr(cli.local_screen, "attach_or_start", attach)
+    password = Mock(side_effect=AssertionError("Password belongs in the Screen child"))
+    monkeypatch.setattr(cli.getpass, "getpass", password)
+
+    assert cli.main(["new", "lab"]) == 0
+    attach.assert_called_once()
+    argv, alias, connection, remote_name = attach.call_args.args
+    assert argv == ["alice@server.example", "new", "lab", "--password"]
+    assert (alias, connection.user, connection.host, remote_name) == (
+        "lab", "alice", "server.example", "lab"
+    )
+    assert attach.call_args.kwargs == {"takeover": False, "new": True}
+    password.assert_not_called()
+
+
+def test_new_workspace_without_host_requires_terminal(monkeypatch, capsys):
+    from pwncat.workspace import cli
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    prompt = Mock(side_effect=AssertionError("Should not prompt without a terminal"))
+    monkeypatch.setattr("builtins.input", prompt)
+
+    assert cli.main(["new", "lab", "--no-attach"]) == 1
+    assert "requires a terminal" in capsys.readouterr().err
+    prompt.assert_not_called()
+
+
+def test_new_workspace_prompts_for_password_without_screen(monkeypatch):
+    from pwncat.workspace import cli
+    from pwncat.workspace.model import WorkspaceRef
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", Mock(side_effect=["server.example", "alice"]))
+    monkeypatch.setattr(cli.local_screen, "available", lambda: False)
+    password = Mock(return_value="fixture-password-secret")
+    monkeypatch.setattr(cli.getpass, "getpass", password)
+    connector = Mock()
+    monkeypatch.setattr(cli, "SSHConnection", connector)
+    backend = Mock()
+    backend.ref = WorkspaceRef("lab", "a" * 32, "1:100", "/home/alice/socket")
+    monkeypatch.setattr(cli, "TmuxWorkspace", Mock(return_value=backend))
+
+    assert cli.main(["new", "lab", "--no-attach"]) == 0
+    assert connector.call_args.args[0].password == "fixture-password-secret"
+    assert password.call_args.args == ("SSH password: ",)
+    saved = ProfileStore().get("lab")
+    assert saved.connection.user == "alice"
+    assert saved.connection.host == "server.example"
+    assert saved.password_prompt
+    assert "fixture-password-secret" not in (ProfileStore().root / "lab.json").read_text()
 
 
 def test_local_list_forget_and_missing_alias_never_connect(

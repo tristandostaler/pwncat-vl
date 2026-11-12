@@ -7,6 +7,19 @@
 
 **pwncat-vl** is a community-maintained fork of [pwncat-cs](https://github.com/calebstewart/pwncat), revived to support **modern Python versions (3.9 to 3.14)** and ensure the tool remains usable for current red team workflows.
 
+## Quick setup from a local checkout
+
+To run `pwncat-vl` directly from this checkout, install it with pipx in editable mode:
+
+```sh
+git clone https://github.com/Chocapikk/pwncat-vl.git
+cd pwncat-vl
+pipx install --force --editable .
+pwncat-vl --help
+```
+
+`--force` replaces an existing pipx installation. Editable mode links the installed command to this checkout, so changes to its Python source take effect the next time you run `pwncat-vl`.
+
 ---
 
 Originally created by [@calebstewart](https://github.com/calebstewart), `pwncat` is a post-exploitation platform ~~for Linux targets~~.
@@ -81,10 +94,15 @@ This shows an early version - for current details, refer to this repository.
 For persistent SSH panes, use the opt-in **workspace** command:
 
 ```sh
+pwncat-vl workspace new lab
 pwncat-vl workspace user@host new lab --history private
 pwncat-vl workspace attach lab
 pwncat-vl workspace list
 ```
+
+The first form asks for the SSH host, username, and password in the terminal.
+Once created, the workspace can be reopened by its saved name. If you already
+have a saved connection for that name, `new lab` uses it without asking again.
 
 The remote host needs tmux 3.3+, Bash, and SFTP. On a first connection, workspace
 mode displays the SSH host key's SHA-256 fingerprint. Verify it and type `yes`
@@ -98,6 +116,8 @@ The console groups module actions under `module`, pane and window actions under
 `workspace`, and pwncat listeners under `listener`. For example,
 `module list`, `module run bootstrap.pwnbox`, `workspace pane list`,
 `workspace pane select %0`, and `listener start -m linux 4444`.
+Use `module new bootstrap.example` to create and edit a local starter module,
+or `module delete bootstrap.example` to remove one after confirmation.
 `help module run` and Tab show the available actions. Existing short command
 names still work in saved scripts and history.
 For a module that supports it, `module run --background bootstrap.pwnbox`

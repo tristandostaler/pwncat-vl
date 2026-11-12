@@ -13,6 +13,8 @@ class Command(GroupCommand):
         ("status",): CommandRoute("module-task", ("status",), "Show the latest background module's status", "module status"),
         ("result",): CommandRoute("module-task", ("result",), "Show the latest background module's result", "module result"),
         ("edit",): CommandRoute("edit", summary="Open local module source in an editor"),
+        ("new",): CommandRoute("module-new", summary="Create and edit a local module"),
+        ("delete",): CommandRoute("module-delete", summary="Delete a local module file"),
         ("reload",): CommandRoute("reload", summary="Refresh a module from disk"),
         ("info",): CommandRoute("info", summary="Show module details and arguments"),
         ("search",): CommandRoute("search", summary="Find modules by pattern"),

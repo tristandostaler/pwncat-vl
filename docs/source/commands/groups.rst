@@ -12,7 +12,9 @@ screen shows the grouped names.
     module list
     module search PATTERN
     module info NAME
+    module new NAME
     module edit NAME
+    module delete NAME
     module reload NAME
     module run NAME key=value
     module run --background NAME key=value

@@ -62,8 +62,23 @@ def test_new_client_runs_inside_screen_with_inner_marker(monkeypatch):
     command = call.call_args.args[0]
     assert command[:2] == ["/usr/bin/screen", "-c"]
     assert command[3:5] == ["-m", "-S"]
-    assert command[-3:] == ["workspace", "attach", "lab"]
+    assert command[-4:] == ["-m", "pwncat.workspace.screen_client", "attach", "lab"]
     assert call.call_args.kwargs["env"][local_screen.INNER] == "1"
+
+
+def test_screen_uses_short_compatible_term_for_long_terminal_name(monkeypatch):
+    original = "rxvt-unicode-256color"
+    monkeypatch.setenv("TERM", original)
+    monkeypatch.setattr(local_screen.shutil, "which", lambda _: "/usr/bin/screen")
+    monkeypatch.setattr(local_screen, "_existing", lambda *_: None)
+    call = Mock(return_value=0)
+    monkeypatch.setattr(local_screen.subprocess, "call", call)
+    connection = SimpleNamespace(host="server.example", user="user", port=22)
+
+    local_screen.attach_or_start(["new", "lab"], "lab", connection, "lab")
+
+    assert call.call_args.kwargs["env"]["TERM"] == "xterm-256color"
+    assert local_screen.os.environ["TERM"] == original
 
 
 def test_park_detaches_only_the_current_screen(monkeypatch):

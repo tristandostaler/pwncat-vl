@@ -6,10 +6,23 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pwncat.workspace import local_screen
+from pwncat.workspace import local_screen, screen_client
 
 
 class ScreenScrollbackTests(unittest.TestCase):
+    def test_failed_workspace_stays_visible_until_enter(self):
+        with patch("pwncat.workspace.cli.main", return_value=1) as workspace:
+            with patch("builtins.input", return_value="") as prompt:
+                self.assertEqual(screen_client.main(["attach", "lab"]), 1)
+        workspace.assert_called_once_with(["attach", "lab"])
+        prompt.assert_called_once()
+
+    def test_successful_workspace_closes_without_pause(self):
+        with patch("pwncat.workspace.cli.main", return_value=0):
+            with patch("builtins.input") as prompt:
+                self.assertEqual(screen_client.main(["attach", "lab"]), 0)
+        prompt.assert_not_called()
+
     def test_screen_config_preserves_user_settings_and_alt_buffer(self):
         with TemporaryDirectory() as directory:
             home = Path(directory)

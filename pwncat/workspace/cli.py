@@ -10,6 +10,7 @@ import sys
 import time
 import warnings
 from dataclasses import replace
+from urllib.parse import quote
 
 from . import ConnectionLost, WorkspaceError
 from .console import ConsoleState, WorkspaceConsole, print_panes, transfer
@@ -18,7 +19,12 @@ from .credentials import CredentialStore, Secrets
 from .hostkeys import confirm_host_key
 from . import local_screen
 from .model import safe_text, workspace_name
-from .profiles import ProfileStore, SavedWorkspace
+from .profiles import (
+    ProfileStore,
+    SavedWorkspace,
+    normalize_hostname,
+    validate_username,
+)
 from .saved_forwards import SavedForwards, SavedListeners
 from .ssh import SSHConnection, SSHProfile
 from .terminal import display, terminal_size
@@ -108,7 +114,7 @@ def parser(*, saved_name=False):
         help="List saved local names, or remote workspaces when a host is supplied",
     )
     new = actions.add_parser("new", help="Create and attach a workspace")
-    new.add_argument("name")
+    new.add_argument("name", help="Workspace name; prompts for SSH details if not saved")
     new.add_argument(
         "--history",
         choices=("memory", "private"),
@@ -196,6 +202,22 @@ def parser(*, saved_name=False):
         if action is not edit:
             connection_options(action, child=True)
     return root
+
+
+def prompt_new_connection(args):
+    """Collect a new workspace destination without putting a password in argv."""
+    if not sys.stdin.isatty():
+        raise WorkspaceError(
+            "Creating a new workspace without a host requires a terminal. "
+            "Use 'pwncat-vl workspace USER@HOST new NAME' instead."
+        )
+    host = normalize_hostname(input("SSH host: ").strip())
+    user = validate_username(input("SSH username: ").strip())
+    address = f"[{host}]" if ":" in host else host
+    args.host = f"{quote(user, safe='')}@{address}"
+    if args.password is None:
+        args.password = True
+    return args.host
 
 
 def resolve_connection(args, store):
@@ -531,6 +553,11 @@ def main(argv=None):
     connection = backend = None
     try:
         store = ProfileStore()
+        if args.action == "new" and args.host is None and store.get(args.name) is None:
+            host = prompt_new_connection(args)
+            argv = [host, *argv]
+            if args.password is True and "--password" not in argv:
+                argv.append("--password")
         if args.action in ("new", "attach", "console") and not getattr(args, "no_attach", False) and local_screen.available():
             alias, remote_name, base, _password, _passphrase, _expected = resolve_connection(args, store)
             return local_screen.attach_or_start(
