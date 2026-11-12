@@ -88,7 +88,7 @@ class Command(CommandDefinition):
                         console.log(
                             f"[red]error[/red]: invalid choice {args.variable!r}",
                         )
-                    if args.variable == "db":
+                    if args.variable == "db" and not getattr(manager, "_loading_config", False):
                         # Ensure the database is re-opened, if it was already
                         manager.open_database()
                     if manager.sessions and args.variable == "verbose":

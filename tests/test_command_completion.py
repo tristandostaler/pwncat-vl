@@ -9,14 +9,19 @@ from prompt_toolkit.document import Document
 
 from pwncat.commands import CommandCompleter
 from pwncat.commands.alias import Command as AliasCommand
+from pwncat.commands.download import Command as BuiltinDownloadCommand
 from pwncat.commands.sessions import Command as SessionsCommand
+from pwncat.commands.upload import Command as BuiltinUploadCommand
 from pwncat.workspace.console_commands import WORKSPACE_COMMANDS
 
 
 @pytest.fixture
 def completer():
     manager = SimpleNamespace(target=None)
-    commands = [cls(manager) for cls in [AliasCommand, SessionsCommand, *WORKSPACE_COMMANDS]]
+    commands = [cls(manager) for cls in [
+        AliasCommand, SessionsCommand, *WORKSPACE_COMMANDS,
+        BuiltinUploadCommand, BuiltinDownloadCommand,
+    ]]
     commands.append(SimpleNamespace(PROG="raw", ARGS=None))
     return CommandCompleter(manager, commands)
 
@@ -64,6 +69,9 @@ def test_first_argument_without_completer_still_offers_flags(
         ("resume ", {"--help", "-h"}),
         ("download /remote /local --b", {"--background"}),
         ("download /remote /local ", {"--background", "-b", "--overwrite", "--help", "-h"}),
+        ("upload /local /remote --b", {"--background"}),
+        ("upload --b", {"--background"}),
+        ("download --b", {"--background"}),
         ("raw ", set()),
         ("unknown ", set()),
     ],

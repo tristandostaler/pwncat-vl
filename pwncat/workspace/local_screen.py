@@ -21,7 +21,7 @@ DISABLE = "PWNCAT_WORKSPACE_SCREEN_DISABLE"
 
 @contextmanager
 def _scrollback_screenrc():
-    """Keep the outer terminal's scrollback active inside local Screen."""
+    """Start Screen with the terminal's normal alternate-screen behavior."""
     with tempfile.NamedTemporaryFile(
         mode="w", prefix="pwncat-screen-", suffix=".screenrc"
     ) as config:
@@ -29,11 +29,17 @@ def _scrollback_screenrc():
         if user_config.is_file():
             quoted = str(user_config).replace("\\", "\\\\").replace('"', '\\"')
             config.write(f'source "{quoted}"\n')
-        # Screen otherwise switches the outer terminal to its alternate
-        # buffer. Many terminals then turn wheel movement into Up/Down keys,
-        # which prompt_toolkit interprets as command history navigation.
-        config.write("termcapinfo * ti@:te@\n")
+        # A user screenrc may disable ti/te, leaving cmux on its normal buffer
+        # where the wheel cannot navigate remote tmux copy mode. Re-enable the
+        # outer terminal's alternate buffer for this workspace display.
+        config.write(r"termcapinfo * ti=\E[?1049h:te=\E[?1049l" + "\n")
         config.write("defscrollback 50000\n")
+        # In copy mode, terminals may send either normal or application cursor
+        # sequences for the wheel. Translate both without changing the prompt's
+        # Up/Down history bindings outside copy mode.
+        for sequence, direction in ((r"\033[A", "k"), (r"\033[B", "j"),
+                                    (r"\033OA", "k"), (r"\033OB", "j")):
+            config.write(f'bindkey -m "{sequence}" stuff {direction}\n')
         config.flush()
         yield config.name
 
@@ -110,3 +116,20 @@ def park():
     )
     if result.returncode:
         raise WorkspaceError("Could not detach local screen; live sessions were retained.")
+
+
+def scrollback():
+    """Show Screen history when the console receives its first wheel step."""
+    if not managed():
+        return
+    screen = shutil.which("screen")
+    if screen is None:
+        return
+    session = os.environ["STY"]
+    for command in (["copy"], ["stuff", "\x15"]):
+        result = subprocess.run(
+            [screen, "-S", session, "-X", *command],
+            capture_output=True, timeout=5,
+        )
+        if result.returncode:
+            break

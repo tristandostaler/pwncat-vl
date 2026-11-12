@@ -160,6 +160,7 @@ class TmuxWorkspace:
                 ["set-option", "-g", "default-shell", self.shell],
                 ["set-option", "-g", "default-command", launch],
                 ["set-option", "-g", "history-limit", str(history_limit)],
+                ["set-option", "-g", "mouse", "off"],
                 ["set-option", "-g", "remain-on-exit", "on"],
                 ["set-option", "-s", "exit-unattached", "off"],
                 ["set-option", "-s", "set-clipboard", "off"],
@@ -351,6 +352,9 @@ class TmuxWorkspace:
             raise WorkspaceError(
                 "Another display is attached. Use --takeover to detach it explicitly."
             )
+        # Restore native terminal text selection for already running workspaces
+        # that had mouse reporting enabled by an earlier client.
+        self.request("set-option", "-g", "mouse", "off")
         # A new display owns size; observer control clients never affect it.
         args = ["attach-session", "-t", "workspace"]
         if takeover:

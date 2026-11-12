@@ -44,6 +44,12 @@ def test_legacy_profile_and_new_rules_are_validated(saved):
     parsed = SavedWorkspace.parse(document, "lab")
     assert parsed.reverse_forwards == (ReverseForwardRule(4444, 4444, "0.0.0.0"),)
     assert parsed.listeners == (ListenerRule("127.0.0.1", 4444),)
+    document["reverse_forwards"].append({"remote_port": 5555, "local_port": 6666, "bind_ip": "127.0.0.1"})
+    assert len(SavedWorkspace.parse(document, "lab").reverse_forwards) == 2
+    document["reverse_forwards"][1]["remote_port"] = 4444
+    with pytest.raises(WorkspaceError, match="Invalid saved"):
+        SavedWorkspace.parse(document, "lab")
+    document["reverse_forwards"].pop()
     document["reverse_forwards"][0]["bind_ip"] = "192.0.2.1"
     with pytest.raises(WorkspaceError, match="Invalid saved"):
         SavedWorkspace.parse(document, "lab")
@@ -70,6 +76,26 @@ def test_reverse_forward_is_saved_restored_and_removed(saved):
     assert store.get("lab").reverse_forwards == ()
     manager.stop.assert_called_once_with(4444)
     assert fresh.restore_reverse(manager) == []
+
+
+def test_multiple_reverse_rules_are_saved_and_removed_independently(saved):
+    store, profile = saved
+    first = ReverseForwardRule(4444, 5555)
+    second = ReverseForwardRule(6666, 7777)
+    store.remember_reverse("lab", profile.connection, profile.ref, first)
+    store.remember_reverse("lab", profile.connection, profile.ref, second)
+    assert ProfileStore().get("lab").reverse_forwards == (first, second)
+    manager = Mock()
+    manager.list.return_value = []
+    manager.add.side_effect = [
+        ReverseForwardStatus(4444, 5555, "127.0.0.1", True, 0, None),
+        ReverseForwardStatus(6666, 7777, "127.0.0.1", True, 0, None),
+    ]
+    messages = SavedForwards(store, "lab", profile.connection, profile.ref).restore_reverse(manager)
+    assert len(messages) == 2
+    assert manager.add.call_count == 2
+    store.forget_reverse("lab", profile.connection, profile.ref, 4444)
+    assert store.get("lab").reverse_forwards == (second,)
 
 
 def test_failed_reverse_save_closes_new_forward(saved, monkeypatch):

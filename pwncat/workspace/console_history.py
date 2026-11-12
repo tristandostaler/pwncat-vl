@@ -55,6 +55,12 @@ class ConsoleHistory:
             saved = self.store.check_workspace(self.alias, self.connection, self.ref)
             return self._read(saved.console_history_binding)
 
+    def database_uri(self):
+        """Give this workspace its own persistent pwncat database."""
+        with self.store._lock():
+            saved = self.store.check_workspace(self.alias, self.connection, self.ref)
+            return "file://" + str(self.store.root / (".db-" + saved.console_history_binding))
+
     def record(self, line):
         # Leading space is an explicit opt-out. Authentication prompts never
         # pass through this recorder, nor do failed/unsupported commands.

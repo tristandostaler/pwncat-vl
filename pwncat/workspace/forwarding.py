@@ -339,10 +339,10 @@ class ReverseForward:
         self.peers, self.channels = set(), set()
         self.error = None
 
-    def start(self):
+    def start(self, handler):
         try:
             assigned = self.transport.request_port_forward(
-                self.bind_ip, self.remote_port, handler=self._incoming
+                self.bind_ip, self.remote_port, handler=handler
             )
         except (OSError, EOFError, paramiko.SSHException) as exc:
             raise WorkspaceError(
@@ -424,6 +424,15 @@ class ReverseForwards:
     def __init__(self, transport):
         self.transport = transport
         self.entries = {}
+        self.lock = threading.RLock()
+
+    def _incoming(self, channel, origin, server):
+        with self.lock:
+            entry = self.entries.get(server[1])
+            if entry is None or not entry.status().running:
+                close_stream(channel)
+                return
+        entry._incoming(channel, origin, server)
 
     def add(self, remote_port, local_port, *, bind_ip=LOOPBACK):
         remote_port, local_port = port_number(remote_port), port_number(local_port)
@@ -433,31 +442,44 @@ class ReverseForwards:
         bind_ip = str(address)
         if not self.transport.is_active():
             raise WorkspaceError("SSH is disconnected; no reverse forward was started.")
-        existing = self.entries.get(remote_port)
-        if existing and existing.status().running:
-            raise WorkspaceError("That remote port already has a reverse forward. Stop it first.")
-        # paramiko-ng keeps one forwarded-TCP handler per transport; a second
-        # remote listener would silently send its channels to the wrong rule.
-        if any(entry.status().running for entry in self.entries.values()):
-            raise WorkspaceError("Only one reverse forward can run per SSH connection.")
-        if existing:
-            existing.stop()
-        forward = ReverseForward(self.transport, remote_port, local_port, bind_ip)
-        forward.start()
-        self.entries[remote_port] = forward
-        return forward.status()
+        with self.lock:
+            existing = self.entries.get(remote_port)
+            if existing and existing.status().running:
+                raise WorkspaceError("That remote port already has a reverse forward. Stop it first.")
+            if sum(entry.status().running for entry in self.entries.values()) >= 8:
+                raise WorkspaceError("At most eight reverse forwards can run per SSH connection.")
+            if existing:
+                existing.stop()
+            forward = ReverseForward(self.transport, remote_port, local_port, bind_ip)
+            self.entries[remote_port] = forward
+            try:
+                # paramiko-ng has one handler per transport, so every request
+                # must install the same dispatcher for all forwarded ports.
+                forward.start(self._incoming)
+            except Exception:
+                self.entries.pop(remote_port, None)
+                if self.entries and self.transport.is_active():
+                    self.transport._tcp_handler = self._incoming
+                raise
+            return forward.status()
 
     def list(self):
-        return [entry.status() for _, entry in sorted(self.entries.items())]
+        with self.lock:
+            return [entry.status() for _, entry in sorted(self.entries.items())]
 
     def stop(self, remote_port):
         remote_port = port_number(remote_port)
-        entry = self.entries.pop(remote_port, None)
-        if entry is None:
-            raise WorkspaceError("No reverse forward uses that remote port in this connection.")
-        entry.stop()
+        with self.lock:
+            entry = self.entries.pop(remote_port, None)
+            if entry is None:
+                raise WorkspaceError("No reverse forward uses that remote port in this connection.")
+            entry.stop()
+            if self.entries and self.transport.is_active():
+                # cancel_port_forward clears paramiko-ng's transport-wide handler.
+                self.transport._tcp_handler = self._incoming
 
     def close(self):
-        entries, self.entries = list(self.entries.values()), {}
-        for entry in entries:
-            entry.stop()
+        with self.lock:
+            entries, self.entries = list(self.entries.values()), {}
+            for entry in entries:
+                entry.stop()

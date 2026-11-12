@@ -189,9 +189,11 @@ class SavedWorkspace:
             if len({rule.local_port for rule in forwards}) != len(forwards):
                 raise ValueError
             raw_reverse = value.get("reverse_forwards", [])
-            if not isinstance(raw_reverse, list) or len(raw_reverse) > 1:
+            if not isinstance(raw_reverse, list) or len(raw_reverse) > 8:
                 raise ValueError
             reverse_forwards = tuple(ReverseForwardRule(**rule) for rule in raw_reverse)
+            if len({rule.remote_port for rule in reverse_forwards}) != len(reverse_forwards):
+                raise ValueError
             raw_listeners = value.get("listeners", [])
             if not isinstance(raw_listeners, list) or len(raw_listeners) > 8:
                 raise ValueError
@@ -474,9 +476,11 @@ class ProfileStore:
     def remember_reverse(self, alias, connection, ref, rule):
         with self._lock():
             saved = self.check_workspace(alias, connection, ref)
-            if saved.reverse_forwards and saved.reverse_forwards[0].remote_port != rule.remote_port:
-                raise WorkspaceError("Only one reverse forward can be saved per workspace.")
-            self._write(replace(saved, reverse_forwards=(rule,)))
+            rules = {item.remote_port: item for item in saved.reverse_forwards}
+            rules[rule.remote_port] = rule
+            if len(rules) > 8:
+                raise WorkspaceError("At most eight reverse forwards can be saved per workspace.")
+            self._write(replace(saved, reverse_forwards=tuple(rules[key] for key in sorted(rules))))
 
     def forget_reverse(self, alias, connection, ref, remote_port):
         with self._lock():

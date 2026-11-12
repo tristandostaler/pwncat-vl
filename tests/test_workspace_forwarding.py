@@ -54,6 +54,16 @@ class ReplyAfterEOF(socketserver.BaseRequestHandler):
             pass
 
 
+class SecondReplyAfterEOF(ReplyAfterEOF):
+    def handle(self):
+        self.request.settimeout(5)
+        try:
+            data = receive_all(self.request)
+            self.request.sendall(b"second:" + data)
+        except OSError:
+            pass
+
+
 class Policy(paramiko.ServerInterface):
     def __init__(self, server):
         self.server = server
@@ -525,12 +535,41 @@ def test_reverse_forward_denial_and_duplicate_leave_ssh_usable(host):
     manager.add(remote_port, 4444)
     with pytest.raises(WorkspaceError, match="already has a reverse forward"):
         manager.add(remote_port, 5555)
-    with pytest.raises(WorkspaceError, match="Only one reverse forward"):
-        manager.add(free_port(), 5555)
     with pytest.raises(WorkspaceError, match="Reverse bind IP"):
         manager.add(free_port(), 5555, bind_ip="192.0.2.1")
     assert manager.list()[0].remote_port == remote_port
     assert connection.active()
+
+
+def test_multiple_reverse_forwards_route_and_stop_independently(host):
+    _server, connection = host
+    manager = connection.reverse_forwards()
+    first = socketserver.ThreadingTCPServer(("127.0.0.1", 0), ReplyAfterEOF)
+    second = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SecondReplyAfterEOF)
+    for local in (first, second):
+        local.daemon_threads = True
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+    first_port, second_port = free_port(), free_port()
+    try:
+        manager.add(first_port, first.server_address[1])
+        manager.add(second_port, second.server_address[1])
+        for remote_port, local, prefix in ((first_port, first, b"reply:"), (second_port, second, b"second:")):
+            with socket.create_connection(("127.0.0.1", remote_port), timeout=5) as peer:
+                payload = str(local.server_address[1]).encode()
+                peer.sendall(payload)
+                peer.shutdown(socket.SHUT_WR)
+                assert receive_all(peer) == prefix + payload
+        manager.stop(first_port)
+        with socket.create_connection(("127.0.0.1", second_port), timeout=5) as peer:
+            peer.sendall(b"still open")
+            peer.shutdown(socket.SHUT_WR)
+            assert receive_all(peer) == b"second:still open"
+        assert [entry.remote_port for entry in manager.list()] == [second_port]
+    finally:
+        manager.close()
+        for local in (first, second):
+            local.shutdown()
+            local.server_close()
 
 
 def test_external_reverse_bind_is_explicit_and_passed_to_ssh():

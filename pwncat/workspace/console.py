@@ -766,6 +766,31 @@ class WorkspaceConsole:
         from .platform import WorkspaceChannel
 
         manager = self.prepare_manager()
+        from . import local_screen
+
+        if local_screen.managed() and manager.parser.prompt is None:
+            manager.parser.setup_prompt()
+            manager.parser.prompt.mouse_support = True
+            from prompt_toolkit.keys import Keys
+            from prompt_toolkit.key_binding.bindings.mouse import load_mouse_bindings
+
+            default_mouse = next(
+                binding.handler for binding in load_mouse_bindings().bindings
+                if binding.keys == (Keys.Vt100MouseEvent,)
+            )
+
+            @manager.parser.prompt.key_bindings.add(Keys.Vt100MouseEvent)
+            def workspace_mouse(event):
+                data = event.data
+                wheel_up = (
+                    data.startswith("\x1b[<64;")
+                    or (data.startswith("\x1b[M") and len(data) >= 6
+                        and (ord(data[3]) - 32) & 127 == 64)
+                )
+                if wheel_up:
+                    local_screen.scrollback()
+                else:
+                    default_mouse(event)
         if not self._workspace_session_ready:
             channel = None
             try:
@@ -814,7 +839,12 @@ class WorkspaceConsole:
         if self._manager is None:
             from .console_commands import WORKSPACE_COMMANDS
 
-            manager = self._manager = Manager()
+            database_uri = (
+                self.state.history_store.database_uri()
+                if self.state.history_store is not None
+                else "memory://"
+            )
+            manager = self._manager = Manager(database_uri=database_uri)
             manager.workspace_console = self
             manager.workspace_state = self.state
             manager.workspace_backend = self.backend

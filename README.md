@@ -102,8 +102,9 @@ The console groups module actions under `module`, pane and window actions under
 names still work in saved scripts and history.
 For a module that supports it, `module run --background bootstrap.pwnbox`
 keeps the console available. Check it with `module status` and `module result`.
-The terminal's scrollback stays available while the workspace console is open,
-so the mouse wheel can scroll earlier output at any time.
+The local Screen session keeps its own scrollback. In the workspace console,
+scroll up with the mouse wheel to browse it, or press `Ctrl+A`, then `[`;
+press `Esc` to return to the prompt.
 `sessions ID` selects the pwncat session used by `upload` and `download`;
 `workspace pane select %ID` chooses a tmux pane.
 `transfers upload` and `transfers download` group those commands. To stream a

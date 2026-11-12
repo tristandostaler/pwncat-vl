@@ -43,8 +43,8 @@ def runtime(tmp_path, monkeypatch):
         manager.target = result
         return result
 
-    def make_manager():
-        manager = Manager(config=io.StringIO('set -g db "memory://"\n'))
+    def make_manager(**kwargs):
+        manager = Manager(config=io.StringIO('set -g db "memory://"\n'), **kwargs)
         managers.append(manager)
         close_database = Mock(wraps=manager.db.close)
         database_closes.append(close_database)
@@ -89,6 +89,26 @@ def runtime(tmp_path, monkeypatch):
         )
     for manager in managers:
         manager.db.close()
+
+
+def test_workspace_database_can_open_while_default_database_is_locked(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    (tmp_path / "pwncatrc").write_text(
+        'set -g lhost "127.0.0.2"\nset -g db "file://default.db"\n'
+    )
+    first = Manager()
+    second = None
+    try:
+        second = Manager(database_uri="file://workspace.db")
+        assert second.config["db"] == "file://workspace.db"
+        assert str(second.config["lhost"]) == "127.0.0.2"
+        assert (tmp_path / "workspace.db").is_file()
+    finally:
+        if second is not None:
+            second.db.close()
+        first.db.close()
 
 
 def test_resume_retains_selected_session_aliases_and_open_channels(runtime):

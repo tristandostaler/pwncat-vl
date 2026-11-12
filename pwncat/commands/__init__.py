@@ -1048,14 +1048,18 @@ class CommandCompleter(Completer):
         """Construct a new command completer"""
 
         self.layers = {}
-        self.groups = {
-            command.PROG: command for command in commands
-            if isinstance(command, GroupCommand)
-        }
+        self.groups = {}
+        for command in commands:
+            if isinstance(command, GroupCommand):
+                self.groups.setdefault(command.PROG, command)
         local_file_completer = LocalPathCompleter()
         remote_file_completer = RemotePathCompleter(manager)
 
         for command in commands:
+            # Dispatch uses the first command with a given name. Keep its
+            # argument definitions when a later built-in has the same name.
+            if command.PROG in self.layers:
+                continue
             self.layers[command.PROG] = [None, [], {}]
             option_names = []
             if command.ARGS is not None:

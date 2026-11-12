@@ -250,9 +250,12 @@ session, ``Ctrl+Q`` parks the live console and ``workspace attach NAME`` returns
 to the same pwncat sessions and selected session. ``resume`` returns to the
 selected remote pane. The explicit ``detach`` command closes the local pwncat
 sessions. Without local ``screen``, ``Ctrl+Q`` closes the local client.
-The local Screen wrapper keeps the terminal's normal scrollback available in
-both the workspace console and remote panes. The mouse wheel scrolls previous
-output while Up/Down still recall commands at the prompt.
+The local Screen wrapper uses the terminal's alternate screen. In a remote
+tmux pane, ``Ctrl+B`` then ``PageUp`` enters tmux history; the mouse wheel can
+move through it while ordinary mouse selection remains available in cmux.
+In the workspace console, scroll up with the mouse wheel to browse Screen's
+scrollback, or use ``Ctrl+A`` then ``[``. Press ``Esc`` to return. Up/Down recall
+commands at the console prompt.
 
 Colors default to ``auto``, respecting ``NO_COLOR``, terminal capabilities and
 redirected output. Use ``color on`` to explicitly enable colors, even with
@@ -442,8 +445,8 @@ bind address; the SSH protocol does not report the effective address. Use
 ``forward reverse stop 4444`` to close the remote listener and its active
 connections. No program or separate listener is needed on the SSH host.
 
-Reverse forwards are limited to one per SSH connection and sixteen clients per
-forward. They use bounded relay buffers and do not log traffic. Their settings
+Reverse forwards are limited to eight per SSH connection and sixteen clients per
+forward. Each remote port must be unique. They use bounded relay buffers and do not log traffic. Their settings
 are saved with the local workspace profile and restored on attach or reconnect.
 The live connection ends on detach, SSH loss or process exit. If restoration
 fails, the saved setting remains and ``forward reverse list`` shows the error.

@@ -828,7 +828,7 @@ class Manager:
     sessions, and executing modules.
     """
 
-    def __init__(self, config: str = None):
+    def __init__(self, config: str = None, *, database_uri: str = None):
         self.config = Config()
         self.session_id = 0  # start with 0-indexed session IDs
         self.sessions: dict[int, Session] = {}
@@ -839,6 +839,7 @@ class Manager:
         self.interactive_running = False
         self.db: ZODB.DB = None
         self.listeners: list[Listener] = []
+        self._loading_config = True
 
         # This is needed because pwntools captures the terminal...
         # there's no way officially to undo it, so this is a nasty
@@ -901,6 +902,9 @@ class Manager:
             except (FileNotFoundError, PermissionError):
                 pass
 
+        self._loading_config = False
+        if database_uri is not None:
+            self.config.set("db", database_uri, glob=True)
         if self.db is None:
             self.open_database()
 

@@ -10,7 +10,7 @@ from pwncat.workspace import local_screen
 
 
 class ScreenScrollbackTests(unittest.TestCase):
-    def test_screen_config_preserves_user_settings_and_disables_alt_buffer(self):
+    def test_screen_config_preserves_user_settings_and_alt_buffer(self):
         with TemporaryDirectory() as directory:
             home = Path(directory)
             (home / ".screenrc").write_text("startup_message off\n")
@@ -18,8 +18,10 @@ class ScreenScrollbackTests(unittest.TestCase):
                 with local_screen._scrollback_screenrc() as config:
                     contents = Path(config).read_text()
                     self.assertIn(f'source "{home / ".screenrc"}"', contents)
-                    self.assertIn("termcapinfo * ti@:te@", contents)
+                    self.assertIn(r"termcapinfo * ti=\E[?1049h:te=\E[?1049l", contents)
                     self.assertIn("defscrollback 50000", contents)
+                    self.assertIn(r'bindkey -m "\033[A" stuff k', contents)
+                    self.assertIn(r'bindkey -m "\033[B" stuff j', contents)
                 self.assertFalse(Path(config).exists())
 
     def test_new_and_reattached_clients_use_scrollback_config(self):
@@ -28,7 +30,7 @@ class ScreenScrollbackTests(unittest.TestCase):
 
         def call(command, **kwargs):
             config = Path(command[2])
-            self.assertIn("termcapinfo * ti@:te@", config.read_text())
+            self.assertIn(r"termcapinfo * ti=\E[?1049h:te=\E[?1049l", config.read_text())
             configs.append(command)
             return 0
 
@@ -41,6 +43,22 @@ class ScreenScrollbackTests(unittest.TestCase):
         self.assertEqual(configs[0][1], "-c")
         self.assertEqual(configs[0][3:5], ["-m", "-S"])
         self.assertEqual(configs[1][-2:], ["-r", "123.demo"])
+
+    def test_wheel_opens_screen_history_and_moves_back(self):
+        with patch.dict(local_screen.os.environ, {
+            local_screen.INNER: "1", "STY": "123.demo"
+        }):
+            with patch.object(local_screen.shutil, "which", return_value="/usr/bin/screen"):
+                with patch.object(local_screen.subprocess, "run") as run:
+                    run.return_value.returncode = 0
+                    local_screen.scrollback()
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["/usr/bin/screen", "-S", "123.demo", "-X", "copy"],
+                ["/usr/bin/screen", "-S", "123.demo", "-X", "stuff", "\x15"],
+            ],
+        )
 
 
 if __name__ == "__main__":
