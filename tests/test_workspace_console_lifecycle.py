@@ -150,6 +150,27 @@ def test_resume_retains_selected_session_aliases_and_open_channels(runtime):
     runtime.database_closes[0].assert_called_once()
 
 
+def test_managed_console_leaves_terminal_mouse_selection_enabled(runtime, monkeypatch):
+    monkeypatch.setattr("pwncat.workspace.local_screen.managed", lambda: True)
+    make_manager = runtime.factory.side_effect
+
+    def manager_with_mouse_disabled():
+        manager = make_manager()
+        prompt = manager.parser.prompt
+        prompt.mouse_support = False
+        manager.parser.prompt = None
+        manager.parser.setup_prompt = Mock(
+            side_effect=lambda: setattr(manager.parser, "prompt", prompt)
+        )
+        return manager
+
+    runtime.factory.side_effect = manager_with_mouse_disabled
+    runtime.actions.append("detach")
+
+    assert WorkspaceConsole(runtime.backend).run() == "detach"
+    assert runtime.managers[0].parser.prompt.mouse_support is False
+
+
 def test_ctrl_q_detaches_and_later_attach_starts_in_display(runtime, monkeypatch):
     def ctrl_q(_):
         raise InteractiveExit
