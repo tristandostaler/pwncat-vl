@@ -347,54 +347,45 @@ def test_destination_must_be_a_literal_ip(value):
 
 
 @pytest.mark.parametrize(
-    "peer, destination, expected",
+    "destination, expected",
     [
-        ("192.0.2.20", "192.0.2.20", "192.0.2.20"),
-        ("192.0.2.20", "::ffff:192.0.2.20", "192.0.2.20"),
-        ("::ffff:192.0.2.20", "192.0.2.20", "192.0.2.20"),
-        ("2001:db8::20", "2001:0DB8:0:0:0:0:0:20", "2001:db8::20"),
-        ("192.0.2.20", "127.0.0.1", "127.0.0.1"),
-        ("192.0.2.20", "::1", "::1"),
+        ("10.0.0.20", "10.0.0.20"),
+        ("::ffff:10.0.0.20", "10.0.0.20"),
+        ("2001:0DB8:0:0:0:0:0:20", "2001:db8::20"),
+        ("127.0.0.1", "127.0.0.1"),
+        ("::1", "::1"),
     ],
 )
-def test_destination_is_matched_to_pinned_ssh_peer(peer, destination, expected):
+def test_destination_accepts_literal_ips_reachable_from_ssh_host(destination, expected):
     transport = Mock()
-    transport.getpeername.return_value = (peer, 22)
     manager = LocalForwards(transport)
-    # A later DNS change or another connection cannot change this manager's peer.
-    transport.getpeername.return_value = ("203.0.113.40", 22)
     assert manager.validate_destination(destination) == expected
-    with pytest.raises(WorkspaceError, match="connected SSH server IP"):
-        manager.validate_destination("203.0.113.40")
-    transport.getpeername.assert_called_once()
+    transport.getpeername.assert_not_called()
 
 
 def test_rejected_destination_creates_no_listener_or_ssh_channel(monkeypatch):
     transport = Mock()
-    transport.getpeername.return_value = ("192.0.2.20", 22)
     listener = Mock()
     monkeypatch.setattr("pwncat.workspace.forwarding.LocalForward", listener)
     manager = LocalForwards(transport)
-    with pytest.raises(WorkspaceError, match="192.0.2.20"):
-        manager.add(8080, 80, destination_ip="203.0.113.40")
+    with pytest.raises(WorkspaceError, match="literal IPv4 or IPv6"):
+        manager.add(8080, 80, destination_ip="internal.example")
     listener.assert_not_called()
     transport.open_channel.assert_not_called()
     assert manager.list() == []
 
 
-def test_unavailable_peer_information_preserves_only_loopback_destinations():
+def test_internal_destination_does_not_require_ssh_peer_address():
     transport = Mock()
     transport.getpeername.side_effect = OSError("socket closed")
     manager = LocalForwards(transport)
-    assert manager.validate_destination("127.0.0.1") == "127.0.0.1"
-    with pytest.raises(WorkspaceError, match="loopback"):
-        manager.validate_destination("192.0.2.20")
+    assert manager.validate_destination("10.0.0.20") == "10.0.0.20"
+    transport.getpeername.assert_not_called()
 
 
-def test_console_passes_server_ip_to_channel_and_displays_it(capsys):
+def test_console_passes_internal_destination_to_channel_and_displays_it(capsys):
     transport = Mock()
-    transport.getpeername.return_value = ("192.0.2.20", 22)
-    # Record the request without ever contacting the documentation-only IP.
+    # Record the request without ever contacting the example internal IP.
     transport.open_channel.side_effect = paramiko.ChannelException(1, "test denial")
     manager = LocalForwards(transport)
     backend = Mock()
@@ -403,16 +394,16 @@ def test_console_passes_server_ip_to_channel_and_displays_it(capsys):
     console = WorkspaceConsole(backend)
     local_port = free_port()
     try:
-        console.execute(f"forward add {local_port} 192.0.2.20 80")
+        console.execute(f"forward add {local_port} 10.0.0.20 80")
         with socket.create_connection(("127.0.0.1", local_port), timeout=5) as peer:
             assert peer.recv(1) == b""
         assert transport.open_channel.call_args.args[:2] == (
             "direct-tcpip",
-            ("192.0.2.20", 80),
+            ("10.0.0.20", 80),
         )
-        assert manager.list()[0].destination_ip == "192.0.2.20"
+        assert manager.list()[0].destination_ip == "10.0.0.20"
         console.execute("forward list")
-        assert "SSH host 192.0.2.20:80" in capsys.readouterr().out
+        assert "SSH host 10.0.0.20:80" in capsys.readouterr().out
     finally:
         manager.close()
 

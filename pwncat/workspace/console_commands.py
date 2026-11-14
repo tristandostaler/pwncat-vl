@@ -43,10 +43,10 @@ class _Base(CommandDefinition):
 class ForwardCommand(_Base):
     """Manage local and reverse forwards over the workspace SSH connection.
 
-    ``forward add LOCAL_PORT [SERVER_IP] REMOTE_PORT`` forwards
-    ``127.0.0.1:LOCAL_PORT`` to ``SERVER_IP:REMOTE_PORT`` through the existing
-    authenticated SSH connection.  ``SERVER_IP`` defaults to ``127.0.0.1`` and
-    must be a loopback address or the connected SSH peer's IP.
+    ``forward add LOCAL_PORT [DEST_IP] REMOTE_PORT`` forwards
+    ``127.0.0.1:LOCAL_PORT`` to ``DEST_IP:REMOTE_PORT`` through the existing
+    authenticated SSH connection. ``DEST_IP`` defaults to ``127.0.0.1`` and
+    may be any literal IPv4 or IPv6 address reachable from the SSH host.
     ``forward`` or ``forward list`` shows local and reverse forwards together.
     ``forward stop LOCAL_PORT`` also removes the saved setting.
     ``forward reverse add REMOTE_PORT LOCAL_PORT [BIND_IP]`` listens on the

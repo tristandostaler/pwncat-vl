@@ -56,6 +56,7 @@ class WorkspaceChannel(pwncat.channel.Channel):
             raise pwncat.channel.ChannelClosed(self)
 
         view = memoryview(data)
+        deadline = time.monotonic() + 30
         while view:
             try:
                 sent = self.channel.send(view)
@@ -67,12 +68,19 @@ class WorkspaceChannel(pwncat.channel.Channel):
                 raise pwncat.channel.ChannelClosed(self) from exc
 
             if sent == 0:
-                if self.channel.closed:
+                active = getattr(self.backend.connection, "active", None)
+                if (
+                    self.channel.closed
+                    or self.channel.eof_sent
+                    or (callable(active) and not active())
+                    or time.monotonic() >= deadline
+                ):
                     self._connected = False
                     raise pwncat.channel.ChannelClosed(self)
                 time.sleep(0.01)
                 continue
             view = view[sent:]
+            deadline = time.monotonic() + 30
 
         return len(data)
 

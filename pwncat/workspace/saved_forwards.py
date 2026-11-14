@@ -1,8 +1,6 @@
-"""Restore local service listeners after validating the workspace and SSH peer."""
+"""Restore local service listeners for the same saved workspace identity."""
 
 from __future__ import annotations
-
-import ipaddress
 
 from . import WorkspaceError
 from .forwarding import ForwardStatus, ReverseForwardStatus
@@ -19,26 +17,8 @@ class SavedForwards:
     def rules(self):
         return self.store.forward_rules(self.alias, self.connection, self.ref)
 
-    @staticmethod
-    def eligible(manager, rule):
-        address = ipaddress.ip_address(rule.destination_ip)
-        if address.is_loopback:
-            return True
-        try:
-            peer = ipaddress.ip_address(manager.transport.getpeername()[0])
-            if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
-                peer = peer.ipv4_mapped
-            return address == peer
-        except (OSError, TypeError, ValueError, IndexError):
-            return False
-
     def remember(self, manager, entry):
         rule = ForwardRule(entry.local_port, entry.remote_port, entry.destination_ip)
-        if not self.eligible(manager, rule):
-            self.store.forget_forward(
-                self.alias, self.connection, self.ref, rule.local_port
-            )
-            return False
         self.store.remember_forward(self.alias, self.connection, self.ref, rule)
         self.failures.pop(rule.local_port, None)
         return True
@@ -61,11 +41,6 @@ class SavedForwards:
         self.failures.clear()
         for rule in self.rules():
             try:
-                # This check is independent of the manual forwarding command.
-                if not self.eligible(manager, rule):
-                    raise WorkspaceError(
-                        "Automatic restore requires loopback or the current SSH server IP."
-                    )
                 current = next(
                     (
                         item

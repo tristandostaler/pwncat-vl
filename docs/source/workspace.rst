@@ -388,16 +388,14 @@ To supply a destination address explicitly, use:
 
 .. code-block:: text
 
-    forward add LOCAL_PORT SERVER_IP REMOTE_PORT
+    forward add LOCAL_PORT DEST_IP REMOTE_PORT
 
-For example, ``forward add 8080 192.0.2.20 80`` exposes the SSH server's website
-at ``http://127.0.0.1:8080``, if that connection's SSH server IP is ``192.0.2.20``.
-Replace that example address with the IP actually used by your SSH connection.
-The destination must be a literal IPv4/IPv6 loopback address or that connected
-SSH peer's IP. Hostnames, URLs, zone IDs and addresses of other machines are
-rejected. The connected address is pinned to the existing SSH transport; no DNS
-lookup is performed. Omit ``SERVER_IP`` to retain the original ``127.0.0.1``
-destination. ``forward list`` shows each selected destination address and port.
+For example, ``forward add 8080 10.0.0.20 80`` exposes a website reachable
+from the SSH host at ``http://127.0.0.1:8080`` on your computer. The destination
+may be any literal IPv4 or IPv6 address reachable from the SSH host, including
+an internal network address. Hostnames, URLs, and zone IDs are rejected; no DNS
+lookup is performed. Omit ``DEST_IP`` to use ``127.0.0.1`` on the SSH host.
+``forward list`` shows each selected destination address and port.
 
 The local listener always binds to IPv4 loopback. The SSH host is the original
 workspace host, regardless of any nested connection in a pane. Local forwarding

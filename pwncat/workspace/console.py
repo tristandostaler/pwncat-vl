@@ -76,7 +76,7 @@ COMMANDS = {
         "Download through the workspace SSH account.",
     ),
     "forward": (
-        "forward [list] | add LOCAL_PORT [SERVER_IP] REMOTE_PORT | stop LOCAL_PORT | reverse add REMOTE_PORT LOCAL_PORT [BIND_IP] | reverse list | reverse stop REMOTE_PORT",
+        "forward [list] | add LOCAL_PORT [DEST_IP] REMOTE_PORT | stop LOCAL_PORT | reverse add REMOTE_PORT LOCAL_PORT [BIND_IP] | reverse list | reverse stop REMOTE_PORT",
         "Manage local and reverse SSH forwards.",
     ),
     "lpwd": ("lpwd", "Show the local directory used for transfer paths."),
@@ -412,12 +412,11 @@ class WorkspaceConsole:
             self.message(description)
             if args[0] == "forward":
                 self.message(
-                    "SERVER_IP defaults to 127.0.0.1. Use a loopback IP or the IP of the current SSH "
-                    "connection.",
+                    "DEST_IP defaults to 127.0.0.1. Use a literal IPv4 or IPv6 address reachable from the SSH host.",
                     "dim",
                 )
                 self.message(
-                    "Eligible forwards are saved and restored on attach. 'forward stop PORT' also removes the saved setting.",
+                    "Forwards are saved and restored on attach. 'forward stop PORT' also removes the saved setting.",
                     "dim",
                 )
             return
@@ -607,19 +606,14 @@ class WorkspaceConsole:
             entry = manager.add(local, remote, destination_ip=destination)
             if self.state.forward_settings:
                 try:
-                    saved = self.state.forward_settings.remember(manager, entry)
+                    self.state.forward_settings.remember(manager, entry)
                 except (WorkspaceError, OSError) as exc:
                     manager.stop(local)
                     raise WorkspaceError(
                         "Could not save the forward; its new listener was stopped: "
                         + safe_text(exc)
                     ) from exc
-                self.message(
-                    "Saved for automatic restoration on attach/reconnect."
-                    if saved
-                    else "Running for this connection only; automatic restoration is limited to the SSH host and loopback.",
-                    "dim",
-                )
+                self.message("Saved for automatic restoration on attach/reconnect.", "dim")
             self.message(
                 f"Listening on 127.0.0.1:{entry.local_port} -> SSH host {entry.remote_endpoint}.",
                 "green",

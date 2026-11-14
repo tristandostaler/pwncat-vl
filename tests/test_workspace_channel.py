@@ -82,3 +82,22 @@ def test_zero_write_on_closed_ssh_channel_ends_send(channel, monkeypatch):
     with pytest.raises(ChannelClosed):
         channel.send(b"data")
     assert not channel.connected
+
+
+def test_zero_write_after_ssh_eof_ends_send(channel, monkeypatch):
+    monkeypatch.setattr(channel.channel, "send", Mock(return_value=0))
+    channel.channel.eof_sent = True
+
+    with pytest.raises(ChannelClosed):
+        channel.send(b"data")
+    assert not channel.connected
+
+
+def test_stalled_ssh_window_does_not_retry_forever(channel, monkeypatch):
+    monkeypatch.setattr(channel.channel, "send", Mock(return_value=0))
+    clock = SimpleNamespace(monotonic=Mock(side_effect=[0, 31]), sleep=Mock())
+    monkeypatch.setattr("pwncat.workspace.platform.time", clock)
+
+    with pytest.raises(ChannelClosed):
+        channel.send(b"data")
+    assert not channel.connected

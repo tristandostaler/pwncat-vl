@@ -150,8 +150,9 @@ Inside the console, `forward add 8080 8000` connects local `127.0.0.1:8080` to
 `127.0.0.1:8000` on the SSH host using the current connection. Use `forward`
 to list local and reverse forwards together, and `forward stop 8080` to stop
 one. Forwards close when this client disconnects.
-You can specify the destination explicitly with `forward add 8080 SERVER_IP 80`.
-`SERVER_IP` must be a loopback address or the IP used by the current SSH connection.
+You can specify a destination reachable from the SSH host with
+`forward add 8080 DEST_IP 80`. `DEST_IP` must be a literal IPv4 or IPv6 address;
+this includes internal network addresses.
 Open it directly with `pwncat-vl workspace console lab`. Successful connections
 save the server and authentication settings locally. To also save authentication
 secrets in the native OS credential store:

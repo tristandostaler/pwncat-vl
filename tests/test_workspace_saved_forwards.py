@@ -140,32 +140,26 @@ def test_forward_can_still_stop_after_the_profile_is_forgotten(saved):
     assert store.get("lab") is None
 
 
-def test_restore_skips_other_destinations_even_if_manual_validation_allows_them(saved):
+def test_restore_internal_destination_even_if_ssh_peer_changes(saved):
     store, profile, settings = saved
-    rule = ForwardRule(8080, 80, "192.0.2.20")
+    rule = ForwardRule(8080, 80, "10.0.0.20")
     store.remember_forward("lab", profile.connection, profile.ref, rule)
-    # The server's connected IP changed. Never replay the old destination.
     manager = manager_for(peer="192.0.2.21")
-    manager.validate_destination.side_effect = lambda value: value
     messages = settings.restore(manager)
-    assert "not restored" in messages[0]
-    manager.add.assert_not_called()
-    manager.validate_destination.assert_not_called()
+    assert "Restored forward" in messages[0]
+    manager.add.assert_called_once_with(8080, 80, destination_ip="10.0.0.20")
+    manager.transport.getpeername.assert_not_called()
     assert settings.rules() == (rule,)
-    entries, saved_ports = settings.view(manager)
-    assert saved_ports == {8080}
-    assert not entries[0].running
-    assert "current SSH server IP" in entries[0].error
 
 
-def test_manual_other_destination_is_not_saved_and_removes_stale_rule(saved):
+def test_manual_internal_destination_replaces_saved_rule(saved):
     _store, _profile, settings = saved
     manager = manager_for()
     settings.remember(manager, ForwardStatus(8080, 80, True, 0, None))
-    assert not settings.remember(
-        manager, ForwardStatus(8080, 80, True, 0, None, "203.0.113.40")
+    assert settings.remember(
+        manager, ForwardStatus(8080, 80, True, 0, None, "10.0.0.20")
     )
-    assert settings.rules() == ()
+    assert settings.rules() == (ForwardRule(8080, 80, "10.0.0.20"),)
 
 
 def test_restore_continues_after_port_conflict_and_keeps_definition(saved):

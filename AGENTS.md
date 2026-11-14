@@ -4,8 +4,9 @@
 
 - Treat the workspace CLI, console, local Screen client, and pwncat session manager as separate lifecycle owners. Keep `workspace ... --help` usable without importing `pwncat.manager` or `pwncat.util`; load the console only after argument parsing or when entering an interactive workspace.
 - Preserve native terminal text selection in the managed console. Do not enable prompt_toolkit mouse reporting just to handle scrollback; test selection and Screen/tmux history behavior independently.
-- A nonblocking Paramiko send may raise `socket.timeout` when the SSH window is full. Retry the same unsent bytes, respect short writes, and treat a closed channel as a disconnect. Test these cases without a network connection.
-- Validate a forward command's shape and ports before asking the backend for a forwarding manager or opening a listener. Local forward destinations are literal loopback IPs or the IP pinned to the current SSH transport. Apply the same rule to saved-forward restoration. If that policy changes deliberately, update implementation, tests, and user documentation together.
+- A nonblocking Paramiko send may raise `socket.timeout` when the SSH window is full. Retry the same unsent bytes within a bounded no-progress period, respect short writes, and stop if the channel closes, sends EOF, or loses its transport. Test these cases without a network connection.
+- Validate a forward command's shape, ports, and literal destination IP before opening a listener. Destinations may include internal addresses reachable from the SSH host; this is required by Pwnbox bootstrap and other pivot workflows. Keep the local listener bound to loopback and save the destination for restoration under the same workspace identity. Update implementation, tests, and user documentation together when forwarding behavior changes.
+- Before restoring a restriction because tests or documentation expect it, inspect active callers and user-local modules. Older tests and prose can describe an obsolete policy; preserve working workflows and then align the tests and documentation.
 - Keep background transfer and module ownership explicit. A session running background work must remain unavailable for conflicting interactive operations, and detach must not discard live work.
 - After replacing a workspace execution path, search for callers of the old path and remove an unused parallel implementation. The interactive console has one owner in `workspace/console.py`.
 
@@ -16,7 +17,7 @@
 - Exercise module creation, deletion, and reload with duplicate names in different directories and with malformed source. Preserve the prior loaded instance when an edited module fails to compile.
 - A malformed user module must not prevent the manager from starting. Skip and report only that local module during startup, retain the source for repair or deletion, and keep explicit loads strict so their failures are visible to the caller.
 - Keep file creation and deletion inside the local user module directory, reject symlinked module paths, and never overwrite an existing module file.
-- Recently edited user-local modules can live outside this checkout. Include them when the review scope calls for them, keep endpoints and credentials out of reports, and check idempotent recovery paths with mocks. A marked tmux pane may be dead and need respawning before its command can be restarted.
+- Recently edited user-local modules can live outside this checkout. Include them when the review scope calls for them, keep endpoints and credentials out of reports, and check recovery paths with mocks. Preserve a dead pane's diagnostic output unless the module's intended behavior explicitly permits respawning it.
 
 ## Verification
 

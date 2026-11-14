@@ -250,22 +250,9 @@ class LocalForwards:
     def __init__(self, transport):
         self.transport = transport
         self.entries = {}
-        try:
-            # Pin to the authenticated connection's peer, never a fresh DNS answer.
-            self.server_address = destination_address(transport.getpeername()[0])
-        except (OSError, TypeError, IndexError, WorkspaceError):
-            self.server_address = None
 
     def validate_destination(self, value):
-        address = destination_address(value)
-        if address.is_loopback or address == self.server_address:
-            return str(address)
-        allowed = (
-            f" or the connected SSH server IP ({self.server_address})"
-            if self.server_address
-            else ""
-        )
-        raise WorkspaceError(f"Destination must be a loopback address{allowed}.")
+        return str(destination_address(value))
 
     def add(self, local_port, remote_port, *, destination_ip=LOOPBACK):
         local_port, remote_port = port_number(local_port), port_number(remote_port)
