@@ -14,7 +14,6 @@ and ``exit()`` on it exactly as it does for a standalone ``pwncat-vl`` session.
 from __future__ import annotations
 
 import os
-import select
 import socket
 import time
 
@@ -60,15 +59,18 @@ class WorkspaceChannel(pwncat.channel.Channel):
         while view:
             try:
                 sent = self.channel.send(view)
-            except BlockingIOError:
-                select.select([], [self.channel], [], 0.5)
-                continue
+            except (BlockingIOError, socket.timeout):
+                # A full SSH window is temporary on a nonblocking channel.
+                sent = 0
             except Exception as exc:
                 self._connected = False
                 raise pwncat.channel.ChannelClosed(self) from exc
 
             if sent == 0:
-                time.sleep(0.001)
+                if self.channel.closed:
+                    self._connected = False
+                    raise pwncat.channel.ChannelClosed(self)
+                time.sleep(0.01)
                 continue
             view = view[sent:]
 

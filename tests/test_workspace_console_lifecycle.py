@@ -154,8 +154,8 @@ def test_managed_console_leaves_terminal_mouse_selection_enabled(runtime, monkey
     monkeypatch.setattr("pwncat.workspace.local_screen.managed", lambda: True)
     make_manager = runtime.factory.side_effect
 
-    def manager_with_mouse_disabled():
-        manager = make_manager()
+    def manager_with_mouse_disabled(**kwargs):
+        manager = make_manager(**kwargs)
         prompt = manager.parser.prompt
         prompt.mouse_support = False
         manager.parser.prompt = None
@@ -358,8 +358,8 @@ def test_connection_loss_releases_old_console_before_reconnect(runtime, monkeypa
 def test_failed_console_bootstrap_closes_channel_and_manager(runtime):
     original_factory = runtime.factory.side_effect
 
-    def broken_manager():
-        manager = original_factory()
+    def broken_manager(**kwargs):
+        manager = original_factory(**kwargs)
         manager.create_session.side_effect = ValueError(
             "fixture initialization failure"
         )

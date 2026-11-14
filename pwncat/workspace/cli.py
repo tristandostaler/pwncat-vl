@@ -13,7 +13,6 @@ from dataclasses import replace
 from urllib.parse import quote
 
 from . import ConnectionLost, WorkspaceError
-from .console import ConsoleState, WorkspaceConsole, print_panes, transfer
 from .console_history import ConsoleHistory
 from .credentials import CredentialStore, Secrets
 from .hostkeys import confirm_host_key
@@ -427,6 +426,8 @@ def interact(
     listener_settings=None,
     console_history=None,
 ):
+    from .console import ConsoleState, WorkspaceConsole
+
     expected = backend.ref
     state = ConsoleState(
         forward_settings=forward_settings, listener_settings=listener_settings,
@@ -541,6 +542,8 @@ def interact(
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     args = parser(saved_name=uses_saved_name(argv)).parse_args(argv)
+    from .console import WorkspaceConsole, print_panes, transfer
+
     if args.action == "destroy" and not args.yes:
         print(
             "Destroy terminates every workspace pane. Add --yes to confirm.",

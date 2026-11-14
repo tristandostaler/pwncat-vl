@@ -62,6 +62,7 @@ class Command(CommandDefinition):
                 loaded is not None and manager.module_source(name) == source.resolve()
             )
             source.unlink()
+            manager.module_load_errors.pop(name, None)
             if loaded_is_local:
                 manager.modules.pop(name, None)
                 if manager.config.module is loaded:

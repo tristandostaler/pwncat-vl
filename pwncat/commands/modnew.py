@@ -27,7 +27,7 @@ class Command(CommandDefinition):
                 raise ModuleFailed(f"{name}: a module with this name already exists")
             source = create_module_file(name)
             importlib.invalidate_caches()
-            manager.load_modules(str(module_root()))
+            manager.load_modules(str(module_root()), only=name)
             if name not in manager.modules:
                 raise ModuleFailed(f"{name}: source was created but could not be loaded")
         except (ModuleFailed, OSError, ImportError, SyntaxError) as exc:

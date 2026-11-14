@@ -655,7 +655,7 @@ def test_console_missing_selected_pane_never_falls_back():
     backend.split.assert_not_called()
 
 
-def test_console_transfer_eof_reports_loss_instead_of_detaching(monkeypatch, capsys):
+def test_console_connection_loss_reports_loss_instead_of_detaching():
     from pwncat.workspace import ConnectionLost
     from pwncat.workspace.console import WorkspaceConsole
 
@@ -663,13 +663,15 @@ def test_console_transfer_eof_reports_loss_instead_of_detaching(monkeypatch, cap
     backend.current_pane.return_value = "%0"
     backend.connection.active.return_value = False
     console = WorkspaceConsole(backend)
-    console.status = Mock()
-    console.execute = Mock(side_effect=EOFError("transfer interrupted"))
-    monkeypatch.setattr("builtins.input", Mock(return_value="upload a /b"))
+    manager = Mock()
+    console._manager = manager
+    console.prepare_manager = Mock(return_value=manager)
+    console._workspace_session_ready = True
+    console.close = Mock()
     with pytest.raises(ConnectionLost, match="not replayed"):
         console.run()
-    console.execute.assert_called_once_with("upload a /b")
-    assert "transfer interrupted" in capsys.readouterr().out
+    manager.interactive.assert_called_once_with(confirm_exit=False)
+    console.close.assert_called_once()
 
 
 def test_console_reconnect_keeps_local_state_without_replaying(monkeypatch, tmp_path):
@@ -692,7 +694,7 @@ def test_console_reconnect_keeps_local_state_without_replaying(monkeypatch, tmp_
             state.color_mode = "on"
         return consoles[len(states) - 1]
 
-    monkeypatch.setattr("pwncat.workspace.cli.WorkspaceConsole", console_factory)
+    monkeypatch.setattr("pwncat.workspace.console.WorkspaceConsole", console_factory)
     monkeypatch.setattr(
         "pwncat.workspace.cli.SSHConnection", Mock(return_value=connection)
     )

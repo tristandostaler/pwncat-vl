@@ -21,10 +21,9 @@ from __future__ import annotations
 
 from pwncat.commands import CommandDefinition, CommandRoute, GroupCommand, Complete, Parameter
 from pwncat.manager import InteractiveExit
-from pwncat.util import console
 from pwncat.workspace import WorkspaceError
 from pwncat.workspace.console_ui import colors_enabled, output_console
-from pwncat.workspace.model import pane_id, safe_text
+from pwncat.workspace.model import pane_id
 
 class _Base(CommandDefinition):
     LOCAL = True

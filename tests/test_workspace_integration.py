@@ -664,7 +664,7 @@ def test_cli_restores_saved_forward_after_loading_workspace(host, monkeypatch, a
         return "detach"
 
     monkeypatch.setattr("pwncat.workspace.cli.display", display)
-    monkeypatch.setattr("pwncat.workspace.cli.WorkspaceConsole.run", console)
+    monkeypatch.setattr("pwncat.workspace.console.WorkspaceConsole.run", console)
     assert main([action, "saved-forward"]) == 0
     assert len(observed) == 1 and observed[0].running
     assert observed[0].local_port == port

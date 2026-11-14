@@ -126,20 +126,3 @@ def park():
     )
     if result.returncode:
         raise WorkspaceError("Could not detach local screen; live sessions were retained.")
-
-
-def scrollback():
-    """Show Screen history when the console receives its first wheel step."""
-    if not managed():
-        return
-    screen = shutil.which("screen")
-    if screen is None:
-        return
-    session = os.environ["STY"]
-    for command in (["copy"], ["stuff", "\x15"]):
-        result = subprocess.run(
-            [screen, "-S", session, "-X", *command],
-            capture_output=True, timeout=5,
-        )
-        if result.returncode:
-            break

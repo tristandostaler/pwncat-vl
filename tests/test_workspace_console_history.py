@@ -48,7 +48,7 @@ def test_successful_commands_return_in_a_new_console(history, monkeypatch):
     second = make_console(
         saved, ConsoleHistory(store, "lab", saved.connection, saved.ref)
     )
-    monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError))
+    monkeypatch.setattr(second, "_run_pwncat_console", Mock(return_value="detach"))
     assert second.run() == "detach"
     assert second.state.history.get_strings() == ["help", "color off", "detach"]
     assert second.run() == "detach"
@@ -161,7 +161,7 @@ def test_corrupt_history_is_preserved_and_console_still_opens(
     disk.record("help")
     disk.path.write_text("{invalid json")
     console = make_console(saved, disk)
-    monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError))
+    monkeypatch.setattr(console, "_run_pwncat_console", Mock(return_value="detach"))
     assert console.run() == "detach"
     assert console.state.history_store is None
     assert "Console history could not be loaded" in capsys.readouterr().out

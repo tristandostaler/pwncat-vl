@@ -30,7 +30,10 @@ class ModuleFileCommandTests(unittest.TestCase):
         self.root = self.data_home / "pwncat" / "modules"
 
     def tearDown(self):
-        for name in ("bootstrap.pwnbox", "bootstrap", "sample"):
+        for name in (
+            "bootstrap.pwnbox", "bootstrap", "sample", "cached.sample", "cached",
+            "broken", "healthy",
+        ):
             sys.modules.pop("pwncat.modules." + name, None)
 
     def create(self, name="bootstrap.pwnbox"):
@@ -65,6 +68,16 @@ class ModuleFileCommandTests(unittest.TestCase):
         self.assertIn("class Module(BaseModule)", source.read_text())
         self.assertIsInstance(self.manager.modules["sample"], BaseModule)
         self.assertIn("sample", list(local_module_choices(SimpleNamespace(manager=self.manager))))
+
+    def test_new_preserves_existing_module_context(self):
+        self.create("sample")
+        selected = self.manager.modules["sample"]
+        self.manager.config.use(selected)
+
+        self.create("bootstrap.pwnbox")
+
+        self.assertIs(self.manager.modules["sample"], selected)
+        self.assertIs(self.manager.config.module, selected)
 
     def test_delete_confirms_clears_context_and_allows_recreation(self):
         self.create()
@@ -118,6 +131,58 @@ class ModuleFileCommandTests(unittest.TestCase):
             self.create()
         self.assertIn("symlink", log.call_args.args[0])
         self.assertFalse((outside / "pwnbox.py").exists())
+
+    def test_loading_same_module_name_uses_the_requested_directory(self):
+        def write_module(root, marker):
+            package = root / "cached"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("")
+            source = package / "sample.py"
+            source.write_text(
+                "from pwncat.modules import BaseModule\n"
+                "class Module(BaseModule):\n"
+                f"    marker = {marker!r}\n"
+                "    PLATFORM = None\n"
+                "    ARGUMENTS = {}\n"
+                "    def run(self, session):\n"
+                "        return self.marker\n"
+            )
+            return source
+
+        first = write_module(Path(self.temp.name) / "first", "first")
+        second = write_module(Path(self.temp.name) / "second", "second")
+        self.manager.load_modules(str(first.parent.parent))
+        self.assertEqual(self.manager.module_source("cached.sample"), first.resolve())
+        self.manager.load_modules(str(second.parent.parent))
+        self.assertEqual(self.manager.module_source("cached.sample"), second.resolve())
+        self.assertEqual(self.manager.modules["cached.sample"].marker, "second")
+
+    def test_invalid_local_source_does_not_block_startup_or_deletion(self):
+        self.root.mkdir(parents=True)
+        broken = self.root / "broken.py"
+        broken.write_text("class Module(:\n")
+        (self.root / "healthy.py").write_text(
+            "from pwncat.modules import BaseModule\n"
+            "class Module(BaseModule):\n"
+            "    PLATFORM = None\n"
+            "    ARGUMENTS = {}\n"
+            "    def run(self, session):\n"
+            "        return None\n"
+        )
+
+        with patch.object(console, "log"):
+            replacement = Manager(config=io.StringIO('set -g db "memory://"\n'))
+        try:
+            self.assertIn("healthy", replacement.modules)
+            self.assertNotIn("broken", replacement.modules)
+            self.assertIn("SyntaxError", replacement.module_load_errors["broken"])
+            self.assertNotIn("pwncat.modules.broken", sys.modules)
+            replacement.parser.dispatch_line("module delete broken --yes")
+            self.assertFalse(broken.exists())
+            self.assertNotIn("broken", replacement.module_load_errors)
+        finally:
+            replacement.__exit__(None, None, None)
+            replacement.db.close()
 
 
 if __name__ == "__main__":

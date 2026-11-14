@@ -51,6 +51,7 @@ import rich.progress
 import persistent.list
 import ZODB.FileStorage
 import ZODB.MappingStorage
+from rich.markup import escape
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from prompt_toolkit.shortcuts import confirm
@@ -833,6 +834,7 @@ class Manager:
         self.session_id = 0  # start with 0-indexed session IDs
         self.sessions: dict[int, Session] = {}
         self.modules: dict[str, pwncat.modules.BaseModule] = {}
+        self.module_load_errors: dict[str, str] = {}
         self._edited_module_hashes: dict[str, str] = {}
         self._target = None
         self.parser = CommandParser(self)
@@ -862,7 +864,7 @@ class Manager:
 
         # Load local modules if they exist
         if os.path.isdir(modules_dir):
-            self.load_modules(modules_dir)
+            self.load_modules(modules_dir, tolerate_errors=True)
 
         # Load global configuration script, if available
         try:
@@ -971,7 +973,9 @@ class Manager:
 
         return self.db.open()
 
-    def load_modules(self, *paths):
+    def load_modules(
+        self, *paths, only: str | None = None, tolerate_errors: bool = False
+    ):
         """
         Dynamically load modules from the specified paths.
 
@@ -979,31 +983,63 @@ class Manager:
         take its place in the module list. This includes built-in modules.
         """
 
-        for finder, module_name, is_pkg in pkgutil.walk_packages(
-            paths, prefix="pwncat.modules.",
-        ):
-            # Already loaded — reuse it
-            if module_name in sys.modules:
-                module = sys.modules[module_name]
-            else:
-                # Use the finder that walk_packages yielded — it knows
-                # the actual filesystem path, unlike importlib.util.find_spec
-                # which only searches the installed package hierarchy.
+        def specs(directories, prefix):
+            # walk_packages imports packages before descending into them. A
+            # cached package from another module directory would make it walk
+            # that old directory instead of the one requested here.
+            for finder, module_name, is_pkg in pkgutil.iter_modules(directories, prefix):
                 spec = finder.find_spec(module_name)
                 if spec is None:
                     continue
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = module
-                spec.loader.exec_module(module)
+                yield module_name, spec
+                if is_pkg:
+                    yield from specs(spec.submodule_search_locations or (), module_name + ".")
 
-            # We only care about modules that actually define `Module`
-            if not hasattr(module, "Module"):
-                continue
-
-            # Create an instance of this module
+        for module_name, spec in specs(paths, "pwncat.modules."):
             short_name = module_name.split("pwncat.modules.", 1)[1]
-            self.modules[short_name] = module.Module()
-            self.modules[short_name].name = short_name
+            if only is not None and short_name != only and not only.startswith(short_name + "."):
+                continue
+            cached = sys.modules.get(module_name)
+            replaced = False
+            try:
+                if cached is not None and getattr(getattr(cached, "__spec__", None), "origin", None) == spec.origin:
+                    module = cached
+                else:
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = module
+                    replaced = True
+                    spec.loader.exec_module(module)
+
+                # Parent packages are needed for nested imports, but loading
+                # one new module must not replace unrelated live instances.
+                instance = None
+                if only is None or short_name == only:
+                    if hasattr(module, "Module"):
+                        instance = module.Module()
+                        instance.name = short_name
+            except BaseException as exc:
+                if replaced:
+                    if cached is None:
+                        sys.modules.pop(module_name, None)
+                    else:
+                        sys.modules[module_name] = cached
+                if tolerate_errors and isinstance(exc, Exception):
+                    self.module_load_errors[short_name] = f"{type(exc).__name__}: {exc}"
+                    self.log(
+                        f"[yellow]warning[/yellow]: skipped local module "
+                        f"{escape(short_name)} ({type(exc).__name__})"
+                    )
+                    continue
+                raise
+
+            if replaced:
+                parent_name, _, child_name = module_name.rpartition(".")
+                parent = sys.modules.get(parent_name)
+                if parent is not None:
+                    setattr(parent, child_name, module)
+            if instance is not None:
+                self.modules[short_name] = instance
+                self.module_load_errors.pop(short_name, None)
 
     def module_source(self, name: str) -> Path:
         """Return the local Python file backing a loaded module."""

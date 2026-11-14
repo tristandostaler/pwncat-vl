@@ -258,17 +258,14 @@ class LocalForwards:
 
     def validate_destination(self, value):
         address = destination_address(value)
-        return str(address)
-        
-        # address = destination_address(value)
-        # if address.is_loopback or address == self.server_address:
-        #     return str(address)
-        # allowed = (
-        #     f" or the connected SSH server IP ({self.server_address})"
-        #     if self.server_address
-        #     else ""
-        # )
-        # raise WorkspaceError(f"Destination must be a loopback address{allowed}.")
+        if address.is_loopback or address == self.server_address:
+            return str(address)
+        allowed = (
+            f" or the connected SSH server IP ({self.server_address})"
+            if self.server_address
+            else ""
+        )
+        raise WorkspaceError(f"Destination must be a loopback address{allowed}.")
 
     def add(self, local_port, remote_port, *, destination_ip=LOOPBACK):
         local_port, remote_port = port_number(local_port), port_number(remote_port)

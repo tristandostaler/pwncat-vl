@@ -1,5 +1,6 @@
 """Workspace SSH reads distinguish idle channels from actual disconnects."""
 
+import socket
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -59,4 +60,25 @@ def test_connection_error_is_still_reported_as_closed(channel, monkeypatch):
     with pytest.raises(ChannelClosed) as error:
         channel.recv(1024)
     assert error.value.__cause__ is failure
+    assert not channel.connected
+
+
+def test_full_ssh_window_retries_the_unsent_bytes(channel, monkeypatch):
+    send = Mock(side_effect=[socket.timeout(), 2, 2])
+    monkeypatch.setattr(channel.channel, "send", send)
+    monkeypatch.setattr("pwncat.workspace.platform.time.sleep", Mock())
+
+    assert channel.send(b"data") == 4
+    assert [bytes(call.args[0]) for call in send.call_args_list] == [
+        b"data", b"data", b"ta"
+    ]
+    assert channel.connected
+
+
+def test_zero_write_on_closed_ssh_channel_ends_send(channel, monkeypatch):
+    monkeypatch.setattr(channel.channel, "send", Mock(return_value=0))
+    channel.channel.closed = True
+
+    with pytest.raises(ChannelClosed):
+        channel.send(b"data")
     assert not channel.connected

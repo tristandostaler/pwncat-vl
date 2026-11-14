@@ -68,7 +68,9 @@ def test_upload_and_download_follow_session_selection(tmp_path):
     manager = Mock(
         sessions={0: workspace, 1: selected},
         target=workspace,
-        workspace_console=Mock(local_path=lambda value: value),
+        workspace_console=SimpleNamespace(
+            local_path=lambda value: value, transfers=None, modules=None
+        ),
         workspace_backend=Mock(),
         workspace_state=Mock(),
     )

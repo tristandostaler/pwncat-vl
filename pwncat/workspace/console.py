@@ -644,13 +644,13 @@ class WorkspaceConsole:
             self.usage("forward")
 
     def reverse_forward(self, args):
-        manager = self.backend.connection.reverse_forwards()
         if args == ["list"]:
             if not self._list_reverse():
                 self.message("No reverse forwards in this connection.", "dim")
         elif len(args) in (3, 4) and args[0] == "add":
             remote, local = port_number(args[1]), port_number(args[2])
             bind_ip = args[3] if len(args) == 4 else LOOPBACK
+            manager = self.backend.connection.reverse_forwards()
             entry = manager.add(remote, local, bind_ip=bind_ip)
             if self.state.forward_settings:
                 try:
@@ -674,6 +674,7 @@ class WorkspaceConsole:
                 self.message("Saved for automatic restoration on attach/reconnect.", "dim")
         elif len(args) == 2 and args[0] == "stop":
             remote = port_number(args[1])
+            manager = self.backend.connection.reverse_forwards()
             if self.state.forward_settings:
                 self.state.forward_settings.stop_reverse(manager, remote)
                 self.message(f"Stopped reverse forward on SSH host port {remote}; saved setting removed.", "green")
@@ -792,8 +793,6 @@ class WorkspaceConsole:
             self._manager.interactive(confirm_exit=False)
         except InteractiveExit:
             pass
-
-        from . import local_screen
 
         reason = self.state.exit_reason or ("park" if local_screen.managed() else "detach")
         if reason == "connection-lost" or not self.backend.connection.active():

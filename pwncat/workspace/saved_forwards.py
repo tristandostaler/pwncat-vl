@@ -6,7 +6,7 @@ import ipaddress
 
 from . import WorkspaceError
 from .forwarding import ForwardStatus, ReverseForwardStatus
-from .model import ForwardRule, ListenerRule, ReverseForwardRule, safe_text
+from .model import ForwardRule, ReverseForwardRule, safe_text
 
 
 class SavedForwards:
@@ -21,17 +21,16 @@ class SavedForwards:
 
     @staticmethod
     def eligible(manager, rule):
-        return True
-        # address = ipaddress.ip_address(rule.destination_ip)
-        # if address.is_loopback:
-        #     return True
-        # try:
-        #     peer = ipaddress.ip_address(manager.transport.getpeername()[0])
-        #     if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
-        #         peer = peer.ipv4_mapped
-        #     return address == peer
-        # except (OSError, TypeError, ValueError, IndexError):
-        #     return False
+        address = ipaddress.ip_address(rule.destination_ip)
+        if address.is_loopback:
+            return True
+        try:
+            peer = ipaddress.ip_address(manager.transport.getpeername()[0])
+            if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
+                peer = peer.ipv4_mapped
+            return address == peer
+        except (OSError, TypeError, ValueError, IndexError):
+            return False
 
     def remember(self, manager, entry):
         rule = ForwardRule(entry.local_port, entry.remote_port, entry.destination_ip)

@@ -57,22 +57,5 @@ class ScreenScrollbackTests(unittest.TestCase):
         self.assertEqual(configs[0][3:5], ["-m", "-S"])
         self.assertEqual(configs[1][-2:], ["-r", "123.demo"])
 
-    def test_wheel_opens_screen_history_and_moves_back(self):
-        with patch.dict(local_screen.os.environ, {
-            local_screen.INNER: "1", "STY": "123.demo"
-        }):
-            with patch.object(local_screen.shutil, "which", return_value="/usr/bin/screen"):
-                with patch.object(local_screen.subprocess, "run") as run:
-                    run.return_value.returncode = 0
-                    local_screen.scrollback()
-        self.assertEqual(
-            [call.args[0] for call in run.call_args_list],
-            [
-                ["/usr/bin/screen", "-S", "123.demo", "-X", "copy"],
-                ["/usr/bin/screen", "-S", "123.demo", "-X", "stuff", "\x15"],
-            ],
-        )
-
-
 if __name__ == "__main__":
     unittest.main()
