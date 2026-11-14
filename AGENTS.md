@@ -12,7 +12,7 @@
 
 ## Local modules
 
-- A module name in `sys.modules` does not prove that it came from the requested directory. Compare the cached module's source with the requested import specification before reusing it. Restore the prior cache entry if loading a replacement fails.
+- A module name in `sys.modules` does not prove that it came from the requested directory. Compare the cached module's source with the requested import specification before reusing it. When replacing a package from another directory, clear its cached descendants before executing code that may use relative imports. Restore prior cache entries if loading the replacement fails.
 - Creating one module should load that module and its parent packages only. Do not replace unrelated live module instances or the selected module context.
 - Exercise module creation, deletion, and reload with duplicate names in different directories and with malformed source. Preserve the prior loaded instance when an edited module fails to compile.
 - A malformed user module must not prevent the manager from starting. Skip and report only that local module during startup, retain the source for repair or deletion, and keep explicit loads strict so their failures are visible to the caller.

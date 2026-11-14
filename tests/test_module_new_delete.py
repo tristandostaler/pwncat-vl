@@ -31,7 +31,8 @@ class ModuleFileCommandTests(unittest.TestCase):
 
     def tearDown(self):
         for name in (
-            "bootstrap.pwnbox", "bootstrap", "sample", "cached.sample", "cached",
+            "bootstrap.pwnbox", "bootstrap", "sample", "cached.sample",
+            "cached.zhelper", "cached",
             "broken", "healthy",
         ):
             sys.modules.pop("pwncat.modules." + name, None)
@@ -137,11 +138,13 @@ class ModuleFileCommandTests(unittest.TestCase):
             package = root / "cached"
             package.mkdir(parents=True)
             (package / "__init__.py").write_text("")
+            (package / "zhelper.py").write_text(f"MARKER = {marker!r}\n")
             source = package / "sample.py"
             source.write_text(
                 "from pwncat.modules import BaseModule\n"
+                "from .zhelper import MARKER\n"
                 "class Module(BaseModule):\n"
-                f"    marker = {marker!r}\n"
+                "    marker = MARKER\n"
                 "    PLATFORM = None\n"
                 "    ARGUMENTS = {}\n"
                 "    def run(self, session):\n"
@@ -156,6 +159,26 @@ class ModuleFileCommandTests(unittest.TestCase):
         self.manager.load_modules(str(second.parent.parent))
         self.assertEqual(self.manager.module_source("cached.sample"), second.resolve())
         self.assertEqual(self.manager.modules["cached.sample"].marker, "second")
+        self.assertEqual(
+            Path(sys.modules["pwncat.modules.cached.zhelper"].__file__).resolve(),
+            (second.parent / "zhelper.py").resolve(),
+        )
+
+        broken = Path(self.temp.name) / "broken_root" / "cached"
+        broken.mkdir(parents=True)
+        (broken / "__init__.py").write_text(
+            "from .zhelper import MARKER\nraise RuntimeError('broken package')\n"
+        )
+        (broken / "zhelper.py").write_text("MARKER = 'broken'\n")
+        (broken / "sample.py").write_text(second.read_text())
+        with patch.object(console, "log"):
+            self.manager.load_modules(str(broken.parent), tolerate_errors=True)
+        self.assertEqual(self.manager.modules["cached.sample"].marker, "second")
+        self.assertEqual(
+            Path(sys.modules["pwncat.modules.cached.zhelper"].__file__).resolve(),
+            (second.parent / "zhelper.py").resolve(),
+        )
+        self.assertIn("RuntimeError", self.manager.module_load_errors["cached"])
 
     def test_invalid_local_source_does_not_block_startup_or_deletion(self):
         self.root.mkdir(parents=True)

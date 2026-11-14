@@ -995,14 +995,34 @@ class Manager:
                 if is_pkg:
                     yield from specs(spec.submodule_search_locations or (), module_name + ".")
 
+        evicted_modules = {}
+        failed_packages = []
         for module_name, spec in specs(paths, "pwncat.modules."):
+            if any(module_name.startswith(prefix) for prefix in failed_packages):
+                continue
             short_name = module_name.split("pwncat.modules.", 1)[1]
             if only is not None and short_name != only and not only.startswith(short_name + "."):
                 continue
             cached = sys.modules.get(module_name)
+            source_changed = (
+                cached is not None
+                and getattr(getattr(cached, "__spec__", None), "origin", None) != spec.origin
+            )
+            evicted_descendants = {}
+            if source_changed and spec.submodule_search_locations is not None:
+                # A replacement package may import its children before the
+                # walker reaches them. Remove children from the old directory
+                # first so relative imports resolve against the new package.
+                prefix = module_name + "."
+                evicted_descendants = {
+                    name: sys.modules.pop(name)
+                    for name in list(sys.modules)
+                    if name.startswith(prefix)
+                }
+                evicted_modules.update(evicted_descendants)
             replaced = False
             try:
-                if cached is not None and getattr(getattr(cached, "__spec__", None), "origin", None) == spec.origin:
+                if cached is not None and not source_changed:
                     module = cached
                 else:
                     module = importlib.util.module_from_spec(spec)
@@ -1019,11 +1039,25 @@ class Manager:
                         instance.name = short_name
             except BaseException as exc:
                 if replaced:
+                    if spec.submodule_search_locations is not None:
+                        # The failed package may have imported new children
+                        # before raising. Keep its old subtree intact.
+                        prefix = module_name + "."
+                        for name in list(sys.modules):
+                            if name.startswith(prefix):
+                                sys.modules.pop(name)
                     if cached is None:
-                        sys.modules.pop(module_name, None)
+                        previous = evicted_modules.get(module_name)
+                        if previous is None:
+                            sys.modules.pop(module_name, None)
+                        else:
+                            sys.modules[module_name] = previous
                     else:
                         sys.modules[module_name] = cached
+                sys.modules.update(evicted_descendants)
                 if tolerate_errors and isinstance(exc, Exception):
+                    if spec.submodule_search_locations is not None:
+                        failed_packages.append(module_name + ".")
                     self.module_load_errors[short_name] = f"{type(exc).__name__}: {exc}"
                     self.log(
                         f"[yellow]warning[/yellow]: skipped local module "
