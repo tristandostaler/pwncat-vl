@@ -100,7 +100,10 @@ pwncat-vl workspace attach lab
 pwncat-vl workspace list
 ```
 
-The first form asks for the SSH host, username, and password in the terminal.
+The first form asks for the SSH host and username, then whether to save the
+password in the system credential store. It asks for the password privately
+when connecting. Press Enter at the save prompt to keep prompting on later
+connections.
 Once created, the workspace can be reopened by its saved name. If you already
 have a saved connection for that name, `new lab` uses it without asking again.
 

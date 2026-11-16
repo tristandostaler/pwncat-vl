@@ -189,6 +189,29 @@ def test_saving_credentials_does_not_use_a_disabled_backend_or_prompt_first(
     connection.assert_not_called()
 
 
+def test_new_workspace_save_choice_writes_password_after_success(vault, monkeypatch):
+    from pwncat.workspace import cli
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    prompt = Mock(side_effect=["server.example", "alice", "maybe", "yes"])
+    monkeypatch.setattr("builtins.input", prompt)
+    monkeypatch.setattr(cli.local_screen, "available", lambda: False)
+    monkeypatch.setattr(cli.getpass, "getpass", Mock(return_value="fixture-password"))
+    monkeypatch.setattr(cli, "SSHConnection", Mock())
+    backend = Mock()
+    backend.ref = WorkspaceRef("lab", "a" * 32, "1:100", "/home/alice/socket")
+    monkeypatch.setattr(cli, "TmuxWorkspace", Mock(return_value=backend))
+
+    assert main(["new", "lab", "--no-attach"]) == 0
+    saved = ProfileStore().get("lab")
+    assert saved.credential_ref
+    assert CredentialStore(ProfileStore().root, "lab", saved.connection).read(
+        saved.credential_ref
+    ) == Secrets("fixture-password")
+    assert len(prompt.call_args_list) == 4
+    assert "fixture-password" not in (ProfileStore().root / "lab.json").read_text()
+
+
 def test_profile_publish_failure_does_not_write_a_secret(vault, monkeypatch):
     from pwncat.workspace.cli import remember_connection
 

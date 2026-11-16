@@ -45,6 +45,11 @@ Inside an SSH workspace console, pane and window commands are grouped too:
     workspace pane split %0 vertical
     workspace window new sliver
 
+``module load`` accepts ``~`` in a directory path. Give it the directory above
+the module package: for ``bootstrap.wutai``, load
+``~/.local/share/pwncat/modules``. The command reports how many new modules it
+found and reports missing directories.
+
 ``workspace pane select`` changes the pane shown by ``resume``. It does not
 change the active pwncat session used by modules or transfers; ``sessions ID``
 selects that session. ``forward`` already groups local and reverse forwarding

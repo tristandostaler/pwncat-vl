@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 
-import pwncat
+from pathlib import Path
+
+from rich.markup import escape
+
 from pwncat.commands import Complete, Parameter, CommandDefinition
+from pwncat.util import console
 
 
 class Command(CommandDefinition):
@@ -26,6 +30,18 @@ class Command(CommandDefinition):
     DEFAULTS = {}
     LOCAL = True
 
-    def run(self, manager: "pwncat.manager.Manager", args):
+    def run(self, manager, args):
+        paths = [Path(path).expanduser() for path in args.path]
+        for path in paths:
+            if not path.is_dir():
+                reason = "does not exist" if not path.exists() else "is not a directory"
+                console.log(f"[red]error[/red]: {escape(str(path))} {reason}")
+                return
 
-        manager.load_modules(*args.path)
+        before = set(manager.modules)
+        manager.load_modules(*(str(path) for path in paths))
+        new_modules = sorted(set(manager.modules) - before)
+        if new_modules:
+            console.log(f"Loaded {len(new_modules)} new module(s): {escape(', '.join(new_modules))}")
+        else:
+            console.log("No new modules found in the supplied directory.")

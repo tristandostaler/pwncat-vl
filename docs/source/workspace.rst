@@ -100,6 +100,13 @@ use just its local name:
     pwncat-vl workspace status lab
     pwncat-vl workspace list
 
+``workspace new lab`` without a saved connection asks for the SSH host and
+username, then whether to save the password in the system credential store.
+Answer ``yes`` to save it after successful authentication and workspace
+creation; Enter or ``no`` keeps the password prompt on later connections.
+The password itself is entered privately when connecting. A supplied
+``--save-credentials`` option selects saving without this question.
+
 The first command saves the host, username, port, selected key file, known-hosts
 file, and whether to prompt for a password or key passphrase. By default, a saved
 password authentication method still prompts for the password on each connection.

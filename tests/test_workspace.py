@@ -156,11 +156,14 @@ def test_saved_auth_settings_and_option_positions(
     assert expected == saved_workspace.ref
 
 
-def test_new_workspace_prompts_for_unsaved_connection_before_screen(monkeypatch):
+@pytest.mark.parametrize("answer, saved", [("yes", True), ("", False)])
+def test_new_workspace_prompts_for_unsaved_connection_before_screen(
+    monkeypatch, answer, saved
+):
     from pwncat.workspace import cli
 
     monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
-    prompt = Mock(side_effect=["server.example", "alice"])
+    prompt = Mock(side_effect=["server.example", "alice", answer])
     monkeypatch.setattr("builtins.input", prompt)
     monkeypatch.setattr(cli.local_screen, "available", lambda: True)
     attach = Mock(return_value=0)
@@ -171,7 +174,11 @@ def test_new_workspace_prompts_for_unsaved_connection_before_screen(monkeypatch)
     assert cli.main(["new", "lab"]) == 0
     attach.assert_called_once()
     argv, alias, connection, remote_name = attach.call_args.args
-    assert argv == ["alice@server.example", "new", "lab", "--password"]
+    assert argv == [
+        "alice@server.example", "new", "lab", "--password",
+        *(["--save-credentials"] if saved else []),
+    ]
+    assert "Save credentials" in prompt.call_args_list[-1].args[0]
     assert (alias, connection.user, connection.host, remote_name) == (
         "lab", "alice", "server.example", "lab"
     )
@@ -196,7 +203,9 @@ def test_new_workspace_prompts_for_password_without_screen(monkeypatch):
     from pwncat.workspace.model import WorkspaceRef
 
     monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
-    monkeypatch.setattr("builtins.input", Mock(side_effect=["server.example", "alice"]))
+    monkeypatch.setattr(
+        "builtins.input", Mock(side_effect=["server.example", "alice", "no"])
+    )
     monkeypatch.setattr(cli.local_screen, "available", lambda: False)
     password = Mock(return_value="fixture-password-secret")
     monkeypatch.setattr(cli.getpass, "getpass", password)

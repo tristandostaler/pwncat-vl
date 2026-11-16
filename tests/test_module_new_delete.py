@@ -133,6 +133,33 @@ class ModuleFileCommandTests(unittest.TestCase):
         self.assertIn("symlink", log.call_args.args[0])
         self.assertFalse((outside / "pwnbox.py").exists())
 
+    def test_load_expands_home_and_reports_new_modules(self):
+        package = self.root / "bootstrap"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        (package / "wutai.py").write_text(
+            "from pwncat.modules import BaseModule\n"
+            "class Module(BaseModule):\n"
+            "    PLATFORM = None\n"
+            "    def run(self, session):\n"
+            "        return None\n"
+        )
+        with patch.dict(os.environ, {"HOME": self.temp.name}):
+            with patch.object(console, "log") as log:
+                self.manager.parser.dispatch_line("module load ~/data/pwncat/modules")
+
+        self.assertIn("bootstrap.wutai", self.manager.modules)
+        self.assertIn("bootstrap.wutai", log.call_args.args[0])
+
+    def test_load_reports_missing_directory(self):
+        with patch.object(console, "log") as log, patch.object(
+            self.manager, "load_modules"
+        ) as load:
+            self.manager.parser.dispatch_line("module load /missing/module/directory")
+
+        load.assert_not_called()
+        self.assertIn("does not exist", log.call_args.args[0])
+
     def test_loading_same_module_name_uses_the_requested_directory(self):
         def write_module(root, marker):
             package = root / "cached"

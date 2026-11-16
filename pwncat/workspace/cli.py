@@ -216,6 +216,17 @@ def prompt_new_connection(args):
     args.host = f"{quote(user, safe='')}@{address}"
     if args.password is None:
         args.password = True
+    if (args.password or args.passphrase) and not args.save_credentials:
+        while True:
+            answer = input(
+                "Save credentials in the system credential store? [y/N]: "
+            ).strip().lower()
+            if answer in ("", "n", "no"):
+                break
+            if answer in ("y", "yes"):
+                args.save_credentials = True
+                break
+            print("Please answer yes or no.")
     return args.host
 
 
@@ -561,6 +572,8 @@ def main(argv=None):
             argv = [host, *argv]
             if args.password is True and "--password" not in argv:
                 argv.append("--password")
+            if args.save_credentials and "--save-credentials" not in argv:
+                argv.append("--save-credentials")
         if args.action in ("new", "attach", "console") and not getattr(args, "no_attach", False) and local_screen.available():
             alias, remote_name, base, _password, _passphrase, _expected = resolve_connection(args, store)
             return local_screen.attach_or_start(
