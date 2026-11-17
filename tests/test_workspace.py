@@ -206,6 +206,123 @@ def test_new_workspace_without_host_requires_terminal(monkeypatch, capsys):
     prompt.assert_not_called()
 
 
+@pytest.mark.parametrize("user_flag", ["--user", "--username"])
+def test_new_workspace_accepts_host_and_user_without_prompt(monkeypatch, user_flag):
+    from pwncat.workspace import cli
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    prompt = Mock(side_effect=AssertionError("SSH details were supplied"))
+    monkeypatch.setattr("builtins.input", prompt)
+    monkeypatch.setattr(cli.local_screen, "available", lambda: True)
+    attach = Mock(return_value=0)
+    monkeypatch.setattr(cli.local_screen, "attach_or_start", attach)
+
+    assert cli.main(["new", "lab", "--host", "NEW.example", user_flag, "alice"]) == 0
+    argv, alias, connection, remote_name = attach.call_args.args
+    assert argv == ["alice@new.example", "new", "lab"]
+    assert (alias, connection.host, connection.user, remote_name) == (
+        "lab",
+        "new.example",
+        "alice",
+        "lab",
+    )
+    prompt.assert_not_called()
+
+
+def test_new_workspace_flags_connect_and_save_without_screen(monkeypatch):
+    from pwncat.workspace import cli
+    from pwncat.workspace.model import WorkspaceRef
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr(cli.local_screen, "available", lambda: False)
+    connector = Mock()
+    monkeypatch.setattr(cli, "SSHConnection", connector)
+    backend = Mock()
+    backend.ref = WorkspaceRef("lab", "a" * 32, "1:100", "/home/alice/socket")
+    monkeypatch.setattr(cli, "TmuxWorkspace", Mock(return_value=backend))
+
+    assert cli.main(["new", "lab", "--host=SERVER.example", "--user=alice", "--no-attach"]) == 0
+    assert (connector.call_args.args[0].host, connector.call_args.args[0].user) == (
+        "server.example", "alice"
+    )
+    assert ProfileStore().get("lab").connection == SSHProfile("server.example", "alice")
+
+
+def test_new_workspace_prompts_only_for_missing_user(monkeypatch):
+    from pwncat.workspace import cli
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    prompt = Mock(side_effect=["alice", "no"])
+    monkeypatch.setattr("builtins.input", prompt)
+    monkeypatch.setattr(cli.local_screen, "available", lambda: True)
+    attach = Mock(return_value=0)
+    monkeypatch.setattr(cli.local_screen, "attach_or_start", attach)
+
+    assert cli.main(["new", "lab", "--host", "server.example"]) == 0
+    assert [call.args[0] for call in prompt.call_args_list] == [
+        "SSH username: ",
+        "Save credentials in the system credential store? [y/N]: ",
+    ]
+    assert attach.call_args.args[0][0] == "alice@server.example"
+
+
+def test_new_workspace_flags_use_saved_details_and_reject_other_destination(
+    saved_workspace, monkeypatch
+):
+    from pwncat.workspace import cli
+
+    ProfileStore().save(saved_workspace)
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr(cli.local_screen, "available", lambda: True)
+    attach = Mock(return_value=0)
+    monkeypatch.setattr(cli.local_screen, "attach_or_start", attach)
+
+    assert cli.main(["new", "lab", "--host", "server.example"]) == 0
+    assert attach.call_args.args[2].port == 2222
+    assert attach.call_args.args[0][0] == "test@server.example:2222"
+    assert cli.main(["new", "lab", "--user", "other"]) == 1
+    assert attach.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "flag,value", [("--host", "user@host"), ("--user", "user\nname")]
+)
+def test_new_workspace_rejects_invalid_flags_before_connect(monkeypatch, flag, value):
+    from pwncat.workspace import cli
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    connector = Mock()
+    monkeypatch.setattr(cli, "SSHConnection", connector)
+    assert (
+        cli.main(
+            [
+                "new",
+                "lab",
+                "--host",
+                "server.example",
+                "--user",
+                "alice",
+                flag,
+                value,
+                "--no-attach",
+            ]
+        )
+        == 1
+    )
+    connector.assert_not_called()
+
+
+def test_new_workspace_rejects_positional_host_with_host_flag(monkeypatch):
+    from pwncat.workspace import cli
+
+    connector = Mock()
+    monkeypatch.setattr(cli, "SSHConnection", connector)
+    assert (
+        cli.main(["alice@server.example", "new", "lab", "--host", "other.example"]) == 1
+    )
+    connector.assert_not_called()
+
+
 def test_new_workspace_prompts_for_password_without_screen(monkeypatch):
     from pwncat.workspace import cli
     from pwncat.workspace.model import WorkspaceRef
@@ -561,6 +678,75 @@ def test_ssh_banner_eof_explains_early_disconnect(monkeypatch, lost_session):
         transport.get_exception.assert_called_once()
 
 
+@pytest.mark.parametrize("lost_session", [False, True])
+def test_ssh_banner_timeout_explains_unresponsive_server(monkeypatch, lost_session):
+    client = Mock()
+    banner_error = paramiko.SSHException(
+        "Error reading SSH protocol banner: TimeoutError()"
+    )
+    banner_error.__context__ = TimeoutError()
+    if lost_session:
+        client.connect.side_effect = paramiko.SSHException("No existing session")
+        transport = Mock()
+        transport.get_exception.return_value = banner_error
+        client.get_transport.return_value = transport
+    else:
+        client.connect.side_effect = banner_error
+    monkeypatch.setattr("pwncat.workspace.ssh.paramiko.SSHClient", lambda: client)
+
+    with pytest.raises(ConnectionLost, match="Timed out waiting for the SSH server greeting") as error:
+        SSHConnection(SSHProfile("server.example", "test")).connect()
+
+    assert "VPN or network path" in str(error.value)
+    assert "TimeoutError" not in str(error.value)
+    assert error.value.__cause__ is banner_error
+    client.close.assert_called_once()
+
+
+def test_ssh_tcp_timeout_explains_unreachable_server(monkeypatch):
+    client = Mock()
+    client.connect.side_effect = TimeoutError("timed out")
+    monkeypatch.setattr("pwncat.workspace.ssh.paramiko.SSHClient", lambda: client)
+
+    with pytest.raises(ConnectionLost, match="Timed out connecting to the SSH server") as error:
+        SSHConnection(SSHProfile("server.example", "test")).connect()
+
+    assert "VPN or network path" in str(error.value)
+    client.close.assert_called_once()
+
+
+def test_ssh_banner_reset_explains_early_disconnect(monkeypatch):
+    client = Mock()
+    banner_error = paramiko.SSHException(
+        "Error reading SSH protocol banner: [Errno 54] Connection reset by peer"
+    )
+    banner_error.__context__ = ConnectionResetError(54, "Connection reset by peer")
+    client.connect.side_effect = banner_error
+    monkeypatch.setattr("pwncat.workspace.ssh.paramiko.SSHClient", lambda: client)
+
+    with pytest.raises(ConnectionLost, match="reset before the server greeting") as error:
+        SSHConnection(SSHProfile("server.example", "test")).connect()
+
+    assert "VPN or network path" in str(error.value)
+    assert error.value.__cause__ is banner_error
+    client.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "message", ["Invalid SSH banner", "Indecipherable protocol version 'HTTP/1.1'"]
+)
+def test_ssh_invalid_greeting_explains_wrong_service(monkeypatch, message):
+    client = Mock()
+    client.connect.side_effect = paramiko.SSHException(message)
+    monkeypatch.setattr("pwncat.workspace.ssh.paramiko.SSHClient", lambda: client)
+
+    with pytest.raises(ConnectionLost, match="did not send a valid SSH greeting") as error:
+        SSHConnection(SSHProfile("server.example", "test")).connect()
+
+    assert "saved host and port" in str(error.value)
+    client.close.assert_called_once()
+
+
 def test_ssh_no_existing_session_without_cause_explains_disconnect(monkeypatch):
     client = Mock()
     client.connect.side_effect = paramiko.SSHException("No existing session")
@@ -569,6 +755,24 @@ def test_ssh_no_existing_session_without_cause_explains_disconnect(monkeypatch):
 
     with pytest.raises(ConnectionLost, match="closed before setup completed"):
         SSHConnection(SSHProfile("server.example", "test")).connect()
+
+
+def test_ssh_no_existing_session_while_transport_active_explains_handshake_timeout(
+    monkeypatch,
+):
+    client = Mock()
+    client.connect.side_effect = paramiko.SSHException("No existing session")
+    transport = Mock()
+    transport.get_exception.return_value = None
+    transport.is_active.return_value = True
+    client.get_transport.return_value = transport
+    monkeypatch.setattr("pwncat.workspace.ssh.paramiko.SSHClient", lambda: client)
+
+    with pytest.raises(ConnectionLost, match="Timed out completing the SSH handshake"):
+        SSHConnection(SSHProfile("server.example", "test")).connect()
+
+    transport.is_active.assert_called_once()
+    client.close.assert_called_once()
 
 
 def test_ssh_unexpected_connection_error_retains_diagnostic(monkeypatch):
@@ -604,12 +808,70 @@ def test_ssh_peer_closes_socket_before_handshake(monkeypatch, caplog):
     client_socket.close()
 
 
-def test_ssh_banner_eof_does_not_log_paramiko_traceback(caplog):
+def test_ssh_peer_stalls_before_handshake(monkeypatch, caplog):
+    client_socket, server_socket = socket.socketpair()
+    monkeypatch.setattr(
+        "paramiko.client.socket.create_connection",
+        lambda *_args, **_kwargs: client_socket,
+    )
+    original_connect = paramiko.SSHClient.connect
+
+    def short_banner_timeout(client, *args, **kwargs):
+        kwargs["banner_timeout"] = 0.05
+        return original_connect(client, *args, **kwargs)
+
+    monkeypatch.setattr(paramiko.SSHClient, "connect", short_banner_timeout)
+    try:
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(
+                ConnectionLost, match="Timed out waiting for the SSH server greeting"
+            ):
+                SSHConnection(SSHProfile("server.example", "test")).connect()
+    finally:
+        client_socket.close()
+        server_socket.close()
+
+    assert not any(
+        "Error reading SSH protocol banner" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_ssh_peer_sends_invalid_greeting(monkeypatch, caplog):
+    client_socket, server_socket = socket.socketpair()
+    server_socket.sendall(b"SSH-\r\n")
+    monkeypatch.setattr(
+        "paramiko.client.socket.create_connection",
+        lambda *_args, **_kwargs: client_socket,
+    )
+    try:
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(ConnectionLost, match="did not send a valid SSH greeting"):
+                SSHConnection(SSHProfile("server.example", "test")).connect()
+    finally:
+        client_socket.close()
+        server_socket.close()
+
+    assert not any(
+        "Invalid SSH banner" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_ssh_expected_banner_failures_do_not_log_paramiko_traceback(caplog):
     logger = logging.getLogger("paramiko.transport.pwncat_workspace")
     banner_error = paramiko.SSHException(
         "Error reading SSH protocol banner: EOFError()"
     )
     banner_error.__context__ = EOFError()
+    timeout_error = paramiko.SSHException(
+        "Error reading SSH protocol banner: TimeoutError()"
+    )
+    timeout_error.__context__ = TimeoutError()
+    reset_error = paramiko.SSHException(
+        "Error reading SSH protocol banner: [Errno 54] Connection reset by peer"
+    )
+    reset_error.__context__ = ConnectionResetError(54, "Connection reset by peer")
+    invalid_error = paramiko.SSHException("Invalid SSH banner")
     other_error = paramiko.SSHException("unexpected transport failure")
 
     with caplog.at_level(logging.ERROR):
@@ -618,6 +880,17 @@ def test_ssh_banner_eof_does_not_log_paramiko_traceback(caplog):
             banner_error,
             exc_info=(type(banner_error), banner_error, None),
         )
+        logger.error(
+            "Exception: %s",
+            timeout_error,
+            exc_info=(type(timeout_error), timeout_error, None),
+        )
+        for error in (reset_error, invalid_error):
+            logger.error(
+                "Exception: %s",
+                error,
+                exc_info=(type(error), error, None),
+            )
         logger.error(
             "Exception: %s",
             other_error,

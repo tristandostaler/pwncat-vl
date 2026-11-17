@@ -75,12 +75,14 @@ state stop recovery. SSH authentication and host key verification still apply.
 Other commands, and reconnect attempts within an already open client, continue
 to require the original live workspace.
 
-If the SSH endpoint closes before sending its server greeting, workspace mode
-reports that the connection closed before the server greeting. Check the VPN
-or other network path, the saved host and port, and whether SSH is running on
-that host. This happens before password authentication, so changing the
-password alone will not resolve it. The workspace is not created or changed
-when this connection attempt fails.
+If the SSH endpoint closes, resets, or times out before sending its server
+greeting, workspace mode reports the connection problem without a transport
+traceback. It also reports an invalid greeting or a stalled SSH handshake.
+Check the VPN or other network path, the saved host and port, and whether SSH
+is running on that host. An invalid greeting can mean the saved port reaches
+another service. These failures happen before password authentication, so
+changing the password alone will not resolve them. The workspace is not created
+or changed when this connection attempt fails.
 
 The workspace uses a separate tmux server and configuration at
 ``~/.pwncat-workspaces/NAME/``. Ordinary SSH/tmux can attach independently:
@@ -102,6 +104,7 @@ use just its local name:
 .. code-block:: sh
 
     pwncat-vl workspace user@host --password new lab
+    pwncat-vl workspace new lab --host host --user user --password
     pwncat-vl workspace attach lab
     pwncat-vl workspace console lab
     pwncat-vl workspace status lab
@@ -109,8 +112,17 @@ use just its local name:
 
 ``workspace new lab`` without a saved connection asks for the SSH host and
 username, then whether to save the password in the system credential store.
-Answer ``yes`` to save it after successful authentication and workspace
-creation; Enter or ``no`` keeps the password prompt on later connections.
+``workspace new lab --host HOST --user USER`` supplies both details without
+prompting for them; ``--username`` is an alias for ``--user``. Add ``--password``
+for password authentication, or use SSH keys. If only one detail is supplied,
+``new`` asks for the missing one. The ``--host`` value must be a hostname or IP
+address without a username or port. A saved workspace name supplies any
+unspecified connection details and retains its saved port. A supplied host or
+user must match that saved workspace's destination; use ``workspace edit`` to
+change its connection settings.
+When asked whether to save credentials, answer ``yes`` to save the password
+after successful authentication and workspace creation; Enter or ``no`` keeps
+the password prompt on later connections.
 The password itself is entered privately when connecting. A supplied
 ``--save-credentials`` option selects saving without this question.
 

@@ -95,6 +95,7 @@ For persistent SSH panes, use the opt-in **workspace** command:
 
 ```sh
 pwncat-vl workspace new lab
+pwncat-vl workspace new lab --host host --user user
 pwncat-vl workspace user@host new lab --history private
 pwncat-vl workspace attach lab
 pwncat-vl workspace list
@@ -104,6 +105,9 @@ The first form asks for the SSH host and username, then whether to save the
 password in the system credential store. It asks for the password privately
 when connecting. Press Enter at the save prompt to keep prompting on later
 connections.
+The second form supplies both SSH details directly; add `--password` if using
+password authentication. `--username` is also accepted in place of `--user`.
+If only one detail is supplied, the command asks for the missing detail.
 Once created, the workspace can be reopened by its saved name. If you already
 have a saved connection for that name, `new lab` uses it without asking again.
 

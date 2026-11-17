@@ -114,6 +114,8 @@ def parser(*, saved_name=False):
     )
     new = actions.add_parser("new", help="Create and attach a workspace")
     new.add_argument("name", help="Workspace name; prompts for SSH details if not saved")
+    new.add_argument("--host", dest="new_hostname", help="SSH hostname or IP address")
+    new.add_argument("--user", "--username", dest="new_username", help="SSH username")
     new.add_argument(
         "--history",
         choices=("memory", "private"),
@@ -203,20 +205,33 @@ def parser(*, saved_name=False):
     return root
 
 
-def prompt_new_connection(args):
-    """Collect a new workspace destination without putting a password in argv."""
-    if not sys.stdin.isatty():
+def prompt_new_connection(args, saved=None):
+    """Complete a new workspace destination without putting a password in argv."""
+    missing_host = args.new_hostname is None and saved is None
+    missing_user = args.new_username is None and saved is None
+    if (missing_host or missing_user) and not sys.stdin.isatty():
         raise WorkspaceError(
-            "Creating a new workspace without a host requires a terminal. "
-            "Use 'pwncat-vl workspace USER@HOST new NAME' instead."
+            "Creating a new workspace with missing SSH details requires a terminal. "
+            "Supply both --host and --user, or use 'pwncat-vl workspace USER@HOST new NAME'."
         )
-    host = normalize_hostname(input("SSH host: ").strip())
-    user = validate_username(input("SSH username: ").strip())
+    host = args.new_hostname
+    if host is None:
+        host = saved.connection.host if saved else input("SSH host: ").strip()
+    host = normalize_hostname(host)
+    user = args.new_username
+    if user is None:
+        user = saved.connection.user if saved else input("SSH username: ").strip()
+    user = validate_username(user)
     address = f"[{host}]" if ":" in host else host
-    args.host = f"{quote(user, safe='')}@{address}"
-    if args.password is None:
+    saved_port = f":{saved.connection.port}" if saved and args.port is None else ""
+    args.host = f"{quote(user, safe='')}@{address}{saved_port}"
+    if (missing_host or missing_user) and args.password is None:
         args.password = True
-    if (args.password or args.passphrase) and not args.save_credentials:
+    if (
+        (missing_host or missing_user)
+        and (args.password or args.passphrase)
+        and not args.save_credentials
+    ):
         while True:
             answer = input(
                 "Save credentials in the system credential store? [y/N]: "
@@ -228,6 +243,22 @@ def prompt_new_connection(args):
                 break
             print("Please answer yes or no.")
     return args.host
+
+
+def new_connection_argv(argv, host):
+    """Pass one destination form to the managed Screen child."""
+    result = [host]
+    skip_value = False
+    for word in argv:
+        if skip_value:
+            skip_value = False
+        elif word in ("--host", "--user", "--username"):
+            skip_value = True
+        elif word.startswith(("--host=", "--user=", "--username=")):
+            continue
+        else:
+            result.append(word)
+    return result
 
 
 def resolve_connection(args, store):
@@ -567,9 +598,25 @@ def main(argv=None):
     connection = backend = None
     try:
         store = ProfileStore()
-        if args.action == "new" and args.host is None and store.get(args.name) is None:
-            host = prompt_new_connection(args)
-            argv = [host, *argv]
+        if (
+            args.action == "new"
+            and (args.new_hostname is not None or args.new_username is not None)
+            and args.host is not None
+        ):
+            raise WorkspaceError(
+                "Use either the positional USER@HOST or --host/--user for workspace new."
+            )
+        if (
+            args.action == "new"
+            and args.host is None
+            and (
+                store.get(args.name) is None
+                or args.new_hostname is not None
+                or args.new_username is not None
+            )
+        ):
+            host = prompt_new_connection(args, store.get(args.name))
+            argv = new_connection_argv(argv, host)
             if args.password is True and "--password" not in argv:
                 argv.append("--password")
             if args.save_credentials and "--save-credentials" not in argv:

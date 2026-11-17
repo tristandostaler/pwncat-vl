@@ -19,19 +19,34 @@ from .hostkeys import HostKeyPolicy, host_keys_path
 _TRANSPORT_LOG = "paramiko.transport.pwncat_workspace"
 
 
-def _closed_before_banner(exc):
-    return (
-        isinstance(exc, paramiko.SSHException)
-        and str(exc).startswith("Error reading SSH protocol banner:")
-        and (isinstance(exc.__context__, EOFError) or str(exc).endswith("EOFError()"))
-    )
+def _banner_failure(exc):
+    if not isinstance(exc, paramiko.SSHException):
+        return None
+    message = str(exc)
+    if message == "Invalid SSH banner" or message.startswith(
+        "Indecipherable protocol version"
+    ):
+        return "invalid"
+    if not message.startswith("Error reading SSH protocol banner:"):
+        return None
+    if isinstance(exc.__context__, TimeoutError) or str(exc).endswith(
+        ("TimeoutError()", "timeout('timed out')")
+    ):
+        return "timeout"
+    if isinstance(exc.__context__, EOFError) or str(exc).endswith("EOFError()"):
+        return "closed"
+    if isinstance(
+        exc.__context__, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+    ):
+        return "reset"
+    return None
 
 
 class _ExpectedDisconnectFilter(logging.Filter):
     def filter(self, record):
         # Paramiko logs a full traceback from its transport thread before the
         # client can turn this expected connection failure into a useful error.
-        return not (record.exc_info and _closed_before_banner(record.exc_info[1]))
+        return not (record.exc_info and _banner_failure(record.exc_info[1]))
 
 
 logging.getLogger(_TRANSPORT_LOG).addFilter(_ExpectedDisconnectFilter())
@@ -143,6 +158,7 @@ class SSHConnection:
             raise
         except (OSError, EOFError, paramiko.SSHException) as exc:
             cause = exc
+            handshake_pending = False
             if (
                 isinstance(exc, paramiko.SSHException)
                 and str(exc) == "No existing session"
@@ -150,12 +166,39 @@ class SSHConnection:
                 transport = client.get_transport()
                 if transport is not None:
                     cause = transport.get_exception() or exc
+                    handshake_pending = cause is exc and transport.is_active()
             client.close()
-            if _closed_before_banner(cause):
+            banner_failure = _banner_failure(cause)
+            if banner_failure == "timeout":
+                raise ConnectionLost(
+                    "Timed out waiting for the SSH server greeting. "
+                    "Check the VPN or network path, saved host and port, and SSH server."
+                ) from cause
+            if banner_failure == "closed":
                 raise ConnectionLost(
                     "SSH connection closed before the server greeting. "
                     "Check the VPN or network path, host and port, and SSH server."
                 ) from cause
+            if banner_failure == "reset":
+                raise ConnectionLost(
+                    "SSH connection reset before the server greeting. "
+                    "Check the VPN or network path, saved host and port, and SSH server."
+                ) from cause
+            if banner_failure == "invalid":
+                raise ConnectionLost(
+                    "The service on the saved host and port did not send a valid SSH greeting. "
+                    "Check that the port reaches the intended SSH server."
+                ) from cause
+            if isinstance(cause, TimeoutError):
+                raise ConnectionLost(
+                    "Timed out connecting to the SSH server. "
+                    "Check the VPN or network path, saved host and port, and SSH server."
+                ) from cause
+            if handshake_pending:
+                raise ConnectionLost(
+                    "Timed out completing the SSH handshake. "
+                    "Check the VPN or network path and SSH server."
+                ) from exc
             if isinstance(exc, EOFError) or (
                 isinstance(exc, paramiko.SSHException)
                 and str(exc) == "No existing session"
