@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import logging
 import os
 import shlex
 import time
@@ -13,6 +14,27 @@ import paramiko
 
 from . import ConnectionLost, OutcomeUnknown, WorkspaceError
 from .hostkeys import HostKeyPolicy, host_keys_path
+
+
+_TRANSPORT_LOG = "paramiko.transport.pwncat_workspace"
+
+
+def _closed_before_banner(exc):
+    return (
+        isinstance(exc, paramiko.SSHException)
+        and str(exc).startswith("Error reading SSH protocol banner:")
+        and (isinstance(exc.__context__, EOFError) or str(exc).endswith("EOFError()"))
+    )
+
+
+class _ExpectedDisconnectFilter(logging.Filter):
+    def filter(self, record):
+        # Paramiko logs a full traceback from its transport thread before the
+        # client can turn this expected connection failure into a useful error.
+        return not (record.exc_info and _closed_before_banner(record.exc_info[1]))
+
+
+logging.getLogger(_TRANSPORT_LOG).addFilter(_ExpectedDisconnectFilter())
 
 
 def close_channel(channel):
@@ -81,6 +103,7 @@ class SSHConnection:
     def connect(self):
         self.close()
         client = paramiko.SSHClient()
+        client.set_log_channel(_TRANSPORT_LOG)
         try:
             client.load_system_host_keys()
             if self.profile.known_hosts:
@@ -119,7 +142,31 @@ class SSHConnection:
             client.close()
             raise
         except (OSError, EOFError, paramiko.SSHException) as exc:
+            cause = exc
+            if (
+                isinstance(exc, paramiko.SSHException)
+                and str(exc) == "No existing session"
+            ):
+                transport = client.get_transport()
+                if transport is not None:
+                    cause = transport.get_exception() or exc
             client.close()
+            if _closed_before_banner(cause):
+                raise ConnectionLost(
+                    "SSH connection closed before the server greeting. "
+                    "Check the VPN or network path, host and port, and SSH server."
+                ) from cause
+            if isinstance(exc, EOFError) or (
+                isinstance(exc, paramiko.SSHException)
+                and str(exc) == "No existing session"
+                and cause is exc
+            ):
+                raise ConnectionLost(
+                    "SSH connection closed before setup completed. "
+                    "Check the VPN or network path, host and port, and SSH server."
+                ) from exc
+            if cause is not exc:
+                raise ConnectionLost(f"SSH connection failed: {cause}") from cause
             raise ConnectionLost(f"SSH connection failed: {exc}") from exc
         except BaseException:
             client.close()

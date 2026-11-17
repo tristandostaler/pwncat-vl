@@ -75,6 +75,13 @@ state stop recovery. SSH authentication and host key verification still apply.
 Other commands, and reconnect attempts within an already open client, continue
 to require the original live workspace.
 
+If the SSH endpoint closes before sending its server greeting, workspace mode
+reports that the connection closed before the server greeting. Check the VPN
+or other network path, the saved host and port, and whether SSH is running on
+that host. This happens before password authentication, so changing the
+password alone will not resolve it. The workspace is not created or changed
+when this connection attempt fails.
+
 The workspace uses a separate tmux server and configuration at
 ``~/.pwncat-workspaces/NAME/``. Ordinary SSH/tmux can attach independently:
 

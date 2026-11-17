@@ -3,15 +3,23 @@
 import errno
 import hashlib
 import json
+import logging
 import os
+import socket
 import stat
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock
 
+import paramiko
 import pytest
 
-from pwncat.workspace import IdentityMismatch, OutcomeUnknown, WorkspaceError
+from pwncat.workspace import (
+    ConnectionLost,
+    IdentityMismatch,
+    OutcomeUnknown,
+    WorkspaceError,
+)
 from pwncat.workspace.cli import main
 from pwncat.workspace.files import FileService
 from pwncat.workspace.model import safe_text, workspace_name
@@ -524,6 +532,101 @@ def test_connection_closes_client_and_sftp():
     connection.close()
     client.close.assert_called_once()
     sftp.close.assert_called_once()
+
+
+@pytest.mark.parametrize("lost_session", [False, True])
+def test_ssh_banner_eof_explains_early_disconnect(monkeypatch, lost_session):
+    client = Mock()
+    banner_error = paramiko.SSHException("Error reading SSH protocol banner: EOFError()")
+    banner_error.__context__ = EOFError()
+    if lost_session:
+        client.connect.side_effect = paramiko.SSHException("No existing session")
+        transport = Mock()
+        transport.get_exception.return_value = banner_error
+        client.get_transport.return_value = transport
+    else:
+        client.connect.side_effect = banner_error
+    monkeypatch.setattr("pwncat.workspace.ssh.paramiko.SSHClient", lambda: client)
+
+    with pytest.raises(
+        ConnectionLost, match="closed before the server greeting"
+    ) as error:
+        SSHConnection(SSHProfile("server.example", "test")).connect()
+
+    assert "VPN or network path" in str(error.value)
+    assert "No existing session" not in str(error.value)
+    assert error.value.__cause__ is banner_error
+    client.close.assert_called_once()
+    if lost_session:
+        transport.get_exception.assert_called_once()
+
+
+def test_ssh_no_existing_session_without_cause_explains_disconnect(monkeypatch):
+    client = Mock()
+    client.connect.side_effect = paramiko.SSHException("No existing session")
+    client.get_transport.return_value = None
+    monkeypatch.setattr("pwncat.workspace.ssh.paramiko.SSHClient", lambda: client)
+
+    with pytest.raises(ConnectionLost, match="closed before setup completed"):
+        SSHConnection(SSHProfile("server.example", "test")).connect()
+
+
+def test_ssh_unexpected_connection_error_retains_diagnostic(monkeypatch):
+    client = Mock()
+    client.connect.side_effect = paramiko.SSHException("unexpected transport failure")
+    monkeypatch.setattr("pwncat.workspace.ssh.paramiko.SSHClient", lambda: client)
+
+    with pytest.raises(
+        ConnectionLost, match="SSH connection failed: unexpected transport failure"
+    ):
+        SSHConnection(SSHProfile("server.example", "test")).connect()
+
+
+def test_ssh_peer_closes_socket_before_handshake(monkeypatch, caplog):
+    client_socket, server_socket = socket.socketpair()
+    server_socket.close()
+    monkeypatch.setattr(
+        "paramiko.client.socket.create_connection",
+        lambda *_args, **_kwargs: client_socket,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(
+            ConnectionLost, match="SSH connection closed before"
+        ) as error:
+            SSHConnection(SSHProfile("server.example", "test")).connect()
+
+    assert "VPN or network path" in str(error.value)
+    assert not any(
+        "Error reading SSH protocol banner" in r.getMessage()
+        for r in caplog.records
+    )
+    client_socket.close()
+
+
+def test_ssh_banner_eof_does_not_log_paramiko_traceback(caplog):
+    logger = logging.getLogger("paramiko.transport.pwncat_workspace")
+    banner_error = paramiko.SSHException(
+        "Error reading SSH protocol banner: EOFError()"
+    )
+    banner_error.__context__ = EOFError()
+    other_error = paramiko.SSHException("unexpected transport failure")
+
+    with caplog.at_level(logging.ERROR):
+        logger.error(
+            "Exception: %s",
+            banner_error,
+            exc_info=(type(banner_error), banner_error, None),
+        )
+        logger.error(
+            "Exception: %s",
+            other_error,
+            exc_info=(type(other_error), other_error, None),
+        )
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "Exception: unexpected transport failure"
+    ]
 
 
 @pytest.mark.parametrize("result", [(0, b"123\n", b""), (2, b"", b"ps: unsupported")])
